@@ -2155,6 +2155,7 @@ dependencies = [
  "kanono-plugin-api",
  "libloading 0.8.9",
  "rfd",
+ "tokio",
  "zbus",
 ]
 

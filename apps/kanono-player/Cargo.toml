@@ -10,6 +10,7 @@ iced.workspace = true
 crossbeam-channel.workspace = true
 libloading.workspace = true
 rfd.workspace = true
+tokio.workspace = true
 zbus.workspace = true
 kanono-audio-engine = { path = "../../crates/audio-engine" }
 kanono-plugin-api = { path = "../../crates/plugin-api" }

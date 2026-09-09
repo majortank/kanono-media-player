@@ -2,10 +2,10 @@ mod mpris;
 mod plugins;
 mod ui;
 
-use std::{path::PathBuf, time::Duration};
+use std::{path::PathBuf, thread, time::Duration};
 
 use iced::{executor, time, Application, Command, Element, Subscription, Theme};
-use kanono_audio_engine::{playback_state_channel, LibraryDatabase, LibraryTrack, PlaybackStateReceiver, PlaybackUpdate, TrackMetadata, TrackQuery};
+use kanono_audio_engine::{decode_file, playback_state_channel, AudioOutput, LibraryDatabase, LibraryTrack, PlaybackStateReceiver, PlaybackStateSender, PlaybackUpdate, TrackMetadata, TrackQuery};
 use mpris::{MprisCommand, MprisService, MprisState};
 use plugins::PluginRegistry;
 use ui::player_view;
@@ -16,11 +16,12 @@ fn main() -> iced::Result {
 
 struct KanonoApp {
     playback: PlaybackViewState,
+    playback_sender: PlaybackStateSender,
     playback_receiver: PlaybackStateReceiver,
+    audio_output: Option<AudioOutput>,
     mpris_commands: crossbeam_channel::Receiver<MprisCommand>,
     mpris_state: MprisState,
     components: PluginRegistry,
-    library: LibraryDatabase,
     all_tracks: Vec<LibraryTrack>,
     visible_tracks: Vec<LibraryTrack>,
     selected_folder: Option<PathBuf>,
@@ -42,6 +43,8 @@ enum Message {
     PollPlayback,
     PollMpris,
     ImportFolder,
+    FolderPicked(Option<PathBuf>),
+    LibraryIndexed(IndexResult),
     SearchChanged(String),
     SelectFolder(Option<PathBuf>),
     SelectTrack(i64),
@@ -59,7 +62,14 @@ impl Application for KanonoApp {
     type Flags = ();
 
     fn new(_flags: ()) -> (Self, Command<Message>) {
-        let (_playback_sender, playback_receiver) = playback_state_channel();
+        let (playback_sender, playback_receiver) = playback_state_channel();
+        let audio_output = match AudioOutput::open_default(playback_sender.clone()) {
+            Ok(output) => Some(output),
+            Err(error) => {
+                eprintln!("audio output unavailable: {error}");
+                None
+            }
+        };
         let components = PluginRegistry::load_components(component_directory());
         let mpris = MprisService::spawn();
         let library = LibraryDatabase::open(library_database_path()).expect("failed to open music library database");
@@ -67,11 +77,12 @@ impl Application for KanonoApp {
         (
             Self {
                 playback: PlaybackViewState::default(),
+                playback_sender,
                 playback_receiver,
+                audio_output,
                 mpris_commands: mpris.commands,
                 mpris_state: mpris.state,
                 components,
-                library,
                 visible_tracks: all_tracks.clone(),
                 all_tracks,
                 selected_folder: None,
@@ -96,7 +107,13 @@ impl Application for KanonoApp {
         match message {
             Message::PollPlayback => self.apply_playback_updates(),
             Message::PollMpris => self.apply_mpris_commands(),
-            Message::ImportFolder => self.import_folder(),
+            Message::ImportFolder => return Command::perform(pick_music_folder(), Message::FolderPicked),
+            Message::FolderPicked(folder) => {
+                if let Some(folder) = folder {
+                    return Command::perform(index_music_folder(folder), Message::LibraryIndexed);
+                }
+            }
+            Message::LibraryIndexed(result) => self.apply_index_result(result),
             Message::SearchChanged(search) => { self.search = search; self.refresh_visible_tracks(); }
             Message::SelectFolder(folder) => { self.selected_folder = folder; self.refresh_visible_tracks(); }
             Message::SelectTrack(track_id) => self.selected_track = Some(track_id),
@@ -118,6 +135,34 @@ impl Application for KanonoApp {
             time::every(Duration::from_millis(33)).map(|_| Message::PollPlayback),
             time::every(Duration::from_millis(100)).map(|_| Message::PollMpris),
         ])
+    }
+}
+
+#[derive(Debug, Clone)]
+struct IndexResult {
+    folder: PathBuf,
+    tracks: Vec<LibraryTrack>,
+    error: Option<String>,
+}
+
+async fn pick_music_folder() -> Option<PathBuf> {
+    rfd::AsyncFileDialog::new().set_title("Add music folder").pick_folder().await.map(|handle| handle.path().to_owned())
+}
+
+async fn index_music_folder(folder: PathBuf) -> IndexResult {
+    let database_path = library_database_path();
+    let result = tokio::task::spawn_blocking({
+        let folder = folder.clone();
+        move || -> Result<Vec<LibraryTrack>, String> {
+            let mut library = LibraryDatabase::open(database_path).map_err(|error| error.to_string())?;
+            library.scan_directory(&folder).map_err(|error| error.to_string())?;
+            library.query(&TrackQuery::default()).map_err(|error| error.to_string())
+        }
+    }).await;
+    match result {
+        Ok(Ok(tracks)) => IndexResult { folder, tracks, error: None },
+        Ok(Err(error)) => IndexResult { folder, tracks: Vec::new(), error: Some(error) },
+        Err(error) => IndexResult { folder, tracks: Vec::new(), error: Some(format!("music indexing worker failed: {error}")) },
     }
 }
 
@@ -161,14 +206,13 @@ impl KanonoApp {
         }
     }
 
-    fn import_folder(&mut self) {
-        let Some(folder) = rfd::FileDialog::new().set_title("Add music folder").pick_folder() else { return };
-        if let Err(error) = self.library.scan_directory(&folder) {
-            eprintln!("unable to index {}: {error}", folder.display());
+    fn apply_index_result(&mut self, result: IndexResult) {
+        if let Some(error) = result.error {
+            eprintln!("unable to index {}: {error}", result.folder.display());
             return;
         }
-        self.all_tracks = self.library.query(&TrackQuery::default()).unwrap_or_default();
-        self.selected_folder = Some(folder);
+        self.all_tracks = result.tracks;
+        self.selected_folder = Some(result.folder);
         self.refresh_visible_tracks();
     }
 
@@ -182,17 +226,27 @@ impl KanonoApp {
     }
 
     fn play_track(&mut self, track_id: i64) {
-        let Some(metadata) = self.all_tracks.iter().find(|track| track.id == track_id).map(|track| TrackMetadata {
-            title: track.title.clone(),
-            artist: track.artist.clone(),
-            album: track.album.clone(),
-            duration: track.duration,
+        let Some((path, metadata)) = self.all_tracks.iter().find(|track| track.id == track_id).map(|track| {
+            (track.path.clone(), TrackMetadata {
+                title: track.title.clone(),
+                artist: track.artist.clone(),
+                album: track.album.clone(),
+                duration: track.duration,
+            })
         }) else { return };
         self.playback.metadata = metadata;
         self.selected_track = Some(track_id);
         self.is_playing = true;
         self.mpris_state.set_metadata(self.playback.metadata.clone());
         self.mpris_state.set_playing(true);
+        self.playback_sender.publish_track(self.playback.metadata.clone());
+        if let Some(audio_output) = &self.audio_output {
+            let queue = audio_output.queue.clone();
+            thread::spawn(move || match decode_file(&path) {
+                Ok(samples) => queue.push_interleaved(samples),
+                Err(error) => eprintln!("unable to decode {}: {error}", path.display()),
+            });
+        }
     }
 
     fn play_next(&mut self) {
