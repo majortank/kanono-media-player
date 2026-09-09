@@ -6,7 +6,7 @@ use std::{path::PathBuf, time::Duration};
 use iced::{executor, time, Application, Command, Element, Subscription, Theme};
 use kanono_audio_engine::{playback_state_channel, PlaybackStateReceiver, PlaybackUpdate, TrackMetadata};
 use plugins::PluginRegistry;
-use ui::{LayoutGrid, Panel, Playlist, TrackInfo, Visualizer};
+use ui::{LayoutGrid, Panel, Playlist, SplitAxis, TrackInfo, Visualizer};
 
 fn main() -> iced::Result {
     KanonoApp::run(iced::Settings::default())
@@ -29,6 +29,10 @@ struct PlaybackViewState {
 #[derive(Debug, Clone)]
 enum Message {
     Toggle(Panel),
+    ToggleDesignMode,
+    BeginPanelDrag(Panel),
+    DropPanelOn(Panel),
+    SetSplitAxis(SplitAxis),
     PollPlayback,
 }
 
@@ -63,6 +67,10 @@ impl Application for KanonoApp {
     fn update(&mut self, message: Message) -> Command<Message> {
         match message {
             Message::Toggle(panel) => self.layout.toggle(panel),
+            Message::ToggleDesignMode => self.layout.toggle_design_mode(),
+            Message::BeginPanelDrag(panel) => self.layout.begin_drag(panel),
+            Message::DropPanelOn(panel) => self.layout.drop_on(panel),
+            Message::SetSplitAxis(axis) => self.layout.set_axis(axis),
             Message::PollPlayback => self.apply_playback_updates(),
         }
         Command::none()
