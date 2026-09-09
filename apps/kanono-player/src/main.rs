@@ -2,13 +2,13 @@ mod mpris;
 mod plugins;
 mod ui;
 
-use std::{path::PathBuf, time::Duration};
+use std::{path::{Path, PathBuf}, time::Duration};
 
 use iced::{executor, time, Application, Command, Element, Subscription, Theme};
-use kanono_audio_engine::{playback_state_channel, PlaybackStateReceiver, PlaybackUpdate, TrackMetadata};
+use kanono_audio_engine::{playback_state_channel, LibraryDatabase, LibraryTrack, PlaybackStateReceiver, PlaybackUpdate, TrackMetadata, TrackQuery};
 use mpris::{MprisCommand, MprisService, MprisState};
 use plugins::PluginRegistry;
-use ui::{LayoutGrid, Panel, Playlist, SplitAxis, TrackInfo, Visualizer};
+use ui::{player_view, LayoutGrid, Panel, SplitAxis};
 
 fn main() -> iced::Result {
     KanonoApp::run(iced::Settings::default())
@@ -21,6 +21,14 @@ struct KanonoApp {
     mpris_commands: crossbeam_channel::Receiver<MprisCommand>,
     mpris_state: MprisState,
     components: PluginRegistry,
+    library: LibraryDatabase,
+    all_tracks: Vec<LibraryTrack>,
+    visible_tracks: Vec<LibraryTrack>,
+    selected_folder: Option<PathBuf>,
+    search: String,
+    selected_track: Option<i64>,
+    queued_track_ids: Vec<i64>,
+    is_playing: bool,
 }
 
 #[derive(Default)]
@@ -39,6 +47,15 @@ enum Message {
     SetSplitAxis(SplitAxis),
     PollPlayback,
     PollMpris,
+    ImportFolder,
+    SearchChanged(String),
+    SelectFolder(Option<PathBuf>),
+    SelectTrack(i64),
+    QueueTrack(i64),
+    PlayTrack(i64),
+    TogglePlayback,
+    Next,
+    Previous,
 }
 
 impl Application for KanonoApp {
@@ -51,6 +68,8 @@ impl Application for KanonoApp {
         let (_playback_sender, playback_receiver) = playback_state_channel();
         let components = PluginRegistry::load_components(component_directory());
         let mpris = MprisService::spawn();
+        let mut library = LibraryDatabase::open(library_database_path()).expect("failed to open music library database");
+        let all_tracks = library.query(&TrackQuery::default()).unwrap_or_default();
         (
             Self {
                 layout: LayoutGrid::default(),
@@ -59,6 +78,14 @@ impl Application for KanonoApp {
                 mpris_commands: mpris.commands,
                 mpris_state: mpris.state,
                 components,
+                library,
+                visible_tracks: all_tracks.clone(),
+                all_tracks,
+                selected_folder: None,
+                search: String::new(),
+                selected_track: None,
+                queued_track_ids: Vec::new(),
+                is_playing: false,
             },
             Command::none(),
         )
@@ -81,16 +108,21 @@ impl Application for KanonoApp {
             Message::SetSplitAxis(axis) => self.layout.set_axis(axis),
             Message::PollPlayback => self.apply_playback_updates(),
             Message::PollMpris => self.apply_mpris_commands(),
+            Message::ImportFolder => self.import_folder(),
+            Message::SearchChanged(search) => { self.search = search; self.refresh_visible_tracks(); }
+            Message::SelectFolder(folder) => { self.selected_folder = folder; self.refresh_visible_tracks(); }
+            Message::SelectTrack(track_id) => self.selected_track = Some(track_id),
+            Message::QueueTrack(track_id) => self.queued_track_ids.push(track_id),
+            Message::PlayTrack(track_id) => self.play_track(track_id),
+            Message::TogglePlayback => { self.is_playing = !self.is_playing; self.mpris_state.set_playing(self.is_playing); }
+            Message::Next => self.play_next(),
+            Message::Previous => {},
         }
         Command::none()
     }
 
     fn view(&self) -> Element<'_, Message> {
-        self.layout.view(
-            Playlist::view,
-            || Visualizer::view(&self.playback.visualizer_pcm),
-            || TrackInfo::view(&self.playback.metadata, self.playback.elapsed),
-        )
+        player_view(&self.visible_tracks, self.selected_folder.as_ref(), &self.search, self.selected_track, self.queued_track_ids.len(), self.is_playing, &self.playback.metadata, self.playback.elapsed)
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -105,6 +137,14 @@ fn component_directory() -> PathBuf {
     std::env::var_os("KANONO_COMPONENTS_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("components"))
+}
+
+fn library_database_path() -> PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("kanono-media-player/library.sqlite3")
 }
 
 impl KanonoApp {
@@ -124,10 +164,47 @@ impl KanonoApp {
     fn apply_mpris_commands(&mut self) {
         for command in self.mpris_commands.try_iter() {
             match command {
-                MprisCommand::Play => self.mpris_state.set_playing(true),
-                MprisCommand::Pause | MprisCommand::Stop => self.mpris_state.set_playing(false),
-                MprisCommand::Next | MprisCommand::Previous => {}
+                MprisCommand::Play => { self.is_playing = true; self.mpris_state.set_playing(true); }
+                MprisCommand::Pause | MprisCommand::Stop => { self.is_playing = false; self.mpris_state.set_playing(false); }
+                MprisCommand::Next => self.play_next(),
+                MprisCommand::Previous => {}
             }
+        }
+    }
+
+    fn import_folder(&mut self) {
+        let Some(folder) = rfd::FileDialog::new().set_title("Add music folder").pick_folder() else { return };
+        if let Err(error) = self.library.scan_directory(&folder) {
+            eprintln!("unable to index {}: {error}", folder.display());
+            return;
+        }
+        self.all_tracks = self.library.query(&TrackQuery::default()).unwrap_or_default();
+        self.selected_folder = Some(folder);
+        self.refresh_visible_tracks();
+    }
+
+    fn refresh_visible_tracks(&mut self) {
+        let search = self.search.to_ascii_lowercase();
+        self.visible_tracks = self.all_tracks.iter().filter(|track| {
+            let matches_folder = self.selected_folder.as_ref().is_none_or(|folder| track.path.starts_with(folder));
+            let haystack = format!("{} {} {} {}", track.title, track.artist, track.album, track.genre).to_ascii_lowercase();
+            matches_folder && haystack.contains(&search)
+        }).cloned().collect();
+    }
+
+    fn play_track(&mut self, track_id: i64) {
+        let Some(track) = self.all_tracks.iter().find(|track| track.id == track_id) else { return };
+        self.playback.metadata = TrackMetadata { title: track.title.clone(), artist: track.artist.clone(), album: track.album.clone(), duration: track.duration };
+        self.selected_track = Some(track_id);
+        self.is_playing = true;
+        self.mpris_state.set_metadata(self.playback.metadata.clone());
+        self.mpris_state.set_playing(true);
+    }
+
+    fn play_next(&mut self) {
+        if let Some(track_id) = self.queued_track_ids.first().copied() {
+            self.queued_track_ids.remove(0);
+            self.play_track(track_id);
         }
     }
 }
