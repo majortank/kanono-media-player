@@ -21,6 +21,12 @@ The manager refuses to start a non-final track unless its successor's metadata a
 PCM are ready, and `promote_if_low_water` appends that successor at a two-second
 per-channel low-water mark without ever running decoding in CPAL's callback.
 
+`LibraryDatabase` uses a local SQLite WAL database for recursive MP3, FLAC, and WAV
+indexing. `TrackQuery` composes text, artist, album, genre, and year filters for the
+Playlist view. MP3 `TagUpdate` batches write ID3v2.4 tags and mirrors the changes to
+the database transaction; FLAC and WAV remain read-only until their native tag writers
+are added.
+
 `playback_state_channel` is a bounded crossbeam bridge from decode/audio workers to
 the iced thread. CPAL publishes position with `try_send`; decoded PCM is copied into
 fixed-size `Arc<[f32]>` visualizer windows off the real-time thread. The UI polls at

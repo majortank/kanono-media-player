@@ -17,5 +17,8 @@ anyhow = "1.0"
 cpal = "0.15"
 crossbeam-channel = "0.5"
 iced = { version = "0.12", features = ["tokio"] }
+id3 = "1.16"
 libloading = "0.8"
+rusqlite = { version = "0.32", features = ["bundled"] }
 symphonia = { version = "0.5.4", features = ["mp3", "flac", "wav", "pcm"] }
+walkdir = "2.5"
