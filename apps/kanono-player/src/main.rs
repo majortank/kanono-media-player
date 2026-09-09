@@ -1,10 +1,11 @@
 mod plugins;
 mod ui;
 
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use iced::{executor, time, Application, Command, Element, Subscription, Theme};
 use kanono_audio_engine::{playback_state_channel, PlaybackStateReceiver, PlaybackUpdate, TrackMetadata};
+use plugins::PluginRegistry;
 use ui::{LayoutGrid, Panel, Playlist, TrackInfo, Visualizer};
 
 fn main() -> iced::Result {
@@ -15,6 +16,7 @@ struct KanonoApp {
     layout: LayoutGrid,
     playback: PlaybackViewState,
     playback_receiver: PlaybackStateReceiver,
+    components: PluginRegistry,
 }
 
 #[derive(Default)]
@@ -38,18 +40,24 @@ impl Application for KanonoApp {
 
     fn new(_flags: ()) -> (Self, Command<Message>) {
         let (_playback_sender, playback_receiver) = playback_state_channel();
+        let components = PluginRegistry::load_components(component_directory());
         (
             Self {
                 layout: LayoutGrid::default(),
                 playback: PlaybackViewState::default(),
                 playback_receiver,
+                components,
             },
             Command::none(),
         )
     }
 
     fn title(&self) -> String {
-        "Kanono Media Player".into()
+        format!(
+            "Kanono Media Player - {} components, {} unavailable",
+            self.components.plugins().len(),
+            self.components.failures().len(),
+        )
     }
 
     fn update(&mut self, message: Message) -> Command<Message> {
@@ -71,6 +79,12 @@ impl Application for KanonoApp {
     fn subscription(&self) -> Subscription<Message> {
         time::every(Duration::from_millis(33)).map(|_| Message::PollPlayback)
     }
+}
+
+fn component_directory() -> PathBuf {
+    std::env::var_os("KANONO_COMPONENTS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("components"))
 }
 
 impl KanonoApp {

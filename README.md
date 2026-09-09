@@ -32,3 +32,8 @@ the Rust ABI because the shared `Plugin` trait crosses the library boundary, so
 plugins and host must use the same Rust toolchain and `kanono-plugin-api` version.
 A future independently distributed plugin SDK should use a C-compatible data ABI
 (for example `abi_stable`) instead.
+
+At startup, the player scans `./components` for `.so` files (or the directory in
+`KANONO_COMPONENTS_DIR`), checks the API version, activates each unique component,
+and retains the loaded library for the component's lifetime. A bad component is
+isolated so other components can still load.
