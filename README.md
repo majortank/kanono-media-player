@@ -59,3 +59,14 @@ At startup, the player scans `./components` for `.so` files (or the directory in
 `KANONO_COMPONENTS_DIR`), checks the API version, activates each unique component,
 and retains the loaded library for the component's lifetime. A bad component is
 isolated so other components can still load.
+
+## Performance profiling
+
+Run `cargo bench -p kanono-audio-engine --bench audio_callback` to measure the exact
+PCM drain loop used in CPAL, including an underrun and a contended decode-producer
+scenario. Criterion saves reports in `target/criterion/` for regression comparison.
+
+Install `cargo-flamegraph`, then profile the Iced application with
+`cargo flamegraph --profile profiling --bin kanono-player`. To inspect rendering
+under a specific interaction, enable Design Mode before recording; use `perf record`
+or the generated flamegraph to distinguish Iced layout work from WGPU rendering.

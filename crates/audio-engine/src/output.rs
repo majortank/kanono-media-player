@@ -24,6 +24,15 @@ impl SampleQueue {
     pub fn len(&self) -> usize {
         self.0.lock().expect("audio queue poisoned").len()
     }
+
+    /// The allocation-free PCM transfer used by the CPAL output callback.
+    #[inline]
+    pub fn fill_output(&self, output: &mut [f32]) {
+        let mut queued = self.0.lock().expect("audio queue poisoned");
+        for sample in output.iter_mut() {
+            *sample = queued.pop_front().unwrap_or(0.0);
+        }
+    }
 }
 
 /// Keeps the CPAL stream alive. The callback does no decoding or allocation.
@@ -74,10 +83,7 @@ impl AudioOutput {
             &config,
             move |output: &mut [f32], _| {
                 let frames = output.len() / channels;
-                let mut queued = callback_queue.0.lock().expect("audio queue poisoned");
-                for sample in output.iter_mut() {
-                    *sample = queued.pop_front().unwrap_or(0.0);
-                }
+                callback_queue.fill_output(output);
                 callback_clock.advance(frames as u64);
                 state_sender.publish_position(callback_clock.position(sample_rate));
             },

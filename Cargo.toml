@@ -15,6 +15,7 @@ version = "0.1.0"
 [workspace.dependencies]
 anyhow = "1.0"
 cpal = "0.15"
+criterion = "0.5"
 crossbeam-channel = "0.5"
 ebur128 = "0.1"
 iced = { version = "0.12", features = ["tokio"] }
@@ -24,3 +25,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 symphonia = { version = "0.5.4", features = ["mp3", "flac", "wav", "pcm"] }
 walkdir = "2.5"
 zbus = { version = "4.4", features = ["blocking"] }
+
+[profile.profiling]
+inherits = "release"
+debug = true

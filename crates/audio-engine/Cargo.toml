@@ -13,3 +13,10 @@ id3.workspace = true
 rusqlite.workspace = true
 symphonia.workspace = true
 walkdir.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "audio_callback"
+harness = false
