@@ -8,6 +8,7 @@ license.workspace = true
 anyhow.workspace = true
 cpal.workspace = true
 crossbeam-channel.workspace = true
+crossbeam-queue.workspace = true
 ebur128.workspace = true
 id3.workspace = true
 rusqlite.workspace = true

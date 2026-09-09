@@ -41,8 +41,10 @@ fn benchmark_audio_callback(criterion: &mut Criterion) {
         let running = Arc::new(AtomicBool::new(true));
         let producer_running = Arc::clone(&running);
         let producer = thread::spawn(move || loop {
-            if !producer_running.load(Ordering::Relaxed) { break; }
-            producer_queue.push_interleaved(std::iter::repeat_n(0.25_f32, SAMPLES));
+            if !producer_queue.push_interleaved_cancellable(
+                std::iter::repeat_n(0.25_f32, SAMPLES),
+                || producer_running.load(Ordering::Relaxed),
+            ) { break; }
         });
         bench.iter(|| {
             let mut output = [0.0_f32; SAMPLES];

@@ -67,8 +67,8 @@ impl PlaybackStateReceiver {
 pub struct PlaybackClock(Arc<AtomicU64>);
 
 impl PlaybackClock {
-    pub fn advance(&self, frames: u64) {
-        self.0.fetch_add(frames, Ordering::Relaxed);
+    pub fn advance(&self, frames: u64) -> u64 {
+        self.0.fetch_add(frames, Ordering::Relaxed) + frames
     }
 
     pub fn position(&self, sample_rate: u32) -> Duration {

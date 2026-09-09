@@ -2,7 +2,7 @@ mod mpris;
 mod plugins;
 mod ui;
 
-use std::{path::PathBuf, thread, time::Duration};
+use std::{path::PathBuf, sync::{atomic::{AtomicU64, Ordering}, Arc}, thread, time::Duration};
 
 use iced::{executor, time, Application, Command, Element, Subscription, Theme};
 use kanono_audio_engine::{decode_file, playback_state_channel, AudioOutput, LibraryDatabase, LibraryTrack, PlaybackStateReceiver, PlaybackStateSender, PlaybackUpdate, TrackMetadata, TrackQuery};
@@ -19,6 +19,7 @@ struct KanonoApp {
     playback_sender: PlaybackStateSender,
     playback_receiver: PlaybackStateReceiver,
     audio_output: Option<AudioOutput>,
+    playback_generation: Arc<AtomicU64>,
     mpris_commands: crossbeam_channel::Receiver<MprisCommand>,
     mpris_state: MprisState,
     components: PluginRegistry,
@@ -80,6 +81,7 @@ impl Application for KanonoApp {
                 playback_sender,
                 playback_receiver,
                 audio_output,
+                playback_generation: Arc::new(AtomicU64::new(0)),
                 mpris_commands: mpris.commands,
                 mpris_state: mpris.state,
                 components,
@@ -242,8 +244,15 @@ impl KanonoApp {
         self.playback_sender.publish_track(self.playback.metadata.clone());
         if let Some(audio_output) = &self.audio_output {
             let queue = audio_output.queue.clone();
+            queue.clear();
+            let generation = self.playback_generation.fetch_add(1, Ordering::Relaxed) + 1;
+            let playback_generation = Arc::clone(&self.playback_generation);
             thread::spawn(move || match decode_file(&path) {
-                Ok(samples) => queue.push_interleaved(samples),
+                Ok(samples) => {
+                    queue.push_interleaved_cancellable(samples, || {
+                        playback_generation.load(Ordering::Relaxed) == generation
+                    });
+                }
                 Err(error) => eprintln!("unable to decode {}: {error}", path.display()),
             });
         }

@@ -1,7 +1,8 @@
-use std::{collections::VecDeque, sync::{Arc, Mutex}, time::Duration};
+use std::{sync::{atomic::{AtomicU64, Ordering}, Arc}, thread, time::Duration};
 
 use anyhow::{bail, Context, Result};
 use cpal::{traits::{DeviceTrait, HostTrait, StreamTrait}, BufferSize, SampleFormat, Stream, StreamConfig, SupportedBufferSize};
+use crossbeam_queue::ArrayQueue;
 
 use crate::playback_state::{PlaybackClock, PlaybackStateSender};
 
@@ -13,24 +14,55 @@ pub enum LatencyProfile {
 }
 
 /// Interleaved 32-bit floating point samples shared by the decode worker and callback.
-#[derive(Clone, Default)]
-pub struct SampleQueue(Arc<Mutex<VecDeque<f32>>>);
+#[derive(Clone)]
+pub struct SampleQueue(Arc<ArrayQueue<f32>>);
+
+impl Default for SampleQueue {
+    fn default() -> Self {
+        Self::with_capacity(48_000 * 2 * 10)
+    }
+}
 
 impl SampleQueue {
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self(Arc::new(ArrayQueue::new(capacity)))
+    }
+
+    /// Blocks only the producer when the fixed PCM ring is full; never call from CPAL.
     pub fn push_interleaved(&self, samples: impl IntoIterator<Item = f32>) {
-        self.0.lock().expect("audio queue poisoned").extend(samples);
+        self.push_interleaved_cancellable(samples, || true);
+    }
+
+    /// Returns false when playback was superseded while a decode worker was filling the ring.
+    pub fn push_interleaved_cancellable(
+        &self,
+        samples: impl IntoIterator<Item = f32>,
+        mut should_continue: impl FnMut() -> bool,
+    ) -> bool {
+        for sample in samples {
+            while self.0.push(sample).is_err() {
+                if !should_continue() {
+                    return false;
+                }
+                thread::yield_now();
+            }
+        }
+        true
     }
 
     pub fn len(&self) -> usize {
-        self.0.lock().expect("audio queue poisoned").len()
+        self.0.len()
+    }
+
+    pub fn clear(&self) {
+        while self.0.pop().is_some() {}
     }
 
     /// The allocation-free PCM transfer used by the CPAL output callback.
     #[inline]
     pub fn fill_output(&self, output: &mut [f32]) {
-        let mut queued = self.0.lock().expect("audio queue poisoned");
         for sample in output.iter_mut() {
-            *sample = queued.pop_front().unwrap_or(0.0);
+            *sample = self.0.pop().unwrap_or(0.0);
         }
     }
 }
@@ -73,10 +105,12 @@ impl AudioOutput {
                 }
             }
         }
-        let queue = SampleQueue::default();
+        let queue = SampleQueue::with_capacity(usize::from(config.channels) * config.sample_rate.0 as usize * 10);
         let callback_queue = queue.clone();
         let clock = PlaybackClock::default();
         let callback_clock = clock.clone();
+        let last_position_update = Arc::new(AtomicU64::new(0));
+        let callback_last_position_update = Arc::clone(&last_position_update);
         let channels = usize::from(config.channels);
         let sample_rate = config.sample_rate.0;
         let stream = device.build_output_stream(
@@ -84,8 +118,13 @@ impl AudioOutput {
             move |output: &mut [f32], _| {
                 let frames = output.len() / channels;
                 callback_queue.fill_output(output);
-                callback_clock.advance(frames as u64);
-                state_sender.publish_position(callback_clock.position(sample_rate));
+                let played_frames = callback_clock.advance(frames as u64);
+                let update_interval = u64::from(sample_rate / 30).max(1);
+                let last_update = callback_last_position_update.load(Ordering::Relaxed);
+                if played_frames.saturating_sub(last_update) >= update_interval {
+                    callback_last_position_update.store(played_frames, Ordering::Relaxed);
+                    state_sender.publish_position(callback_clock.position(sample_rate));
+                }
             },
             move |error| eprintln!("audio output error: {error}"),
             None,
