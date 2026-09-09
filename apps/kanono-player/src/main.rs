@@ -121,7 +121,7 @@ impl Application for KanonoApp {
             Message::SelectTrack(track_id) => self.selected_track = Some(track_id),
             Message::QueueTrack(track_id) => self.queued_track_ids.push(track_id),
             Message::PlayTrack(track_id) => self.play_track(track_id),
-            Message::TogglePlayback => { self.is_playing = !self.is_playing; self.mpris_state.set_playing(self.is_playing); }
+            Message::TogglePlayback => self.toggle_playback(),
             Message::Next => self.play_next(),
             Message::Previous => {},
         }
@@ -200,8 +200,9 @@ impl KanonoApp {
         let commands: Vec<_> = self.mpris_commands.try_iter().collect();
         for command in commands {
             match command {
-                MprisCommand::Play => { self.is_playing = true; self.mpris_state.set_playing(true); }
-                MprisCommand::Pause | MprisCommand::Stop => { self.is_playing = false; self.mpris_state.set_playing(false); }
+                MprisCommand::Play => self.resume_playback(),
+                MprisCommand::Pause => self.pause_playback(),
+                MprisCommand::Stop => self.stop_playback(),
                 MprisCommand::Next => self.play_next(),
                 MprisCommand::Previous => {}
             }
@@ -245,6 +246,13 @@ impl KanonoApp {
         if let Some(audio_output) = &self.audio_output {
             let queue = audio_output.queue.clone();
             queue.clear();
+            audio_output.reset_position();
+            if let Err(error) = audio_output.play() {
+                eprintln!("unable to start audio output: {error}");
+                self.is_playing = false;
+                self.mpris_state.set_playing(false);
+                return;
+            }
             let generation = self.playback_generation.fetch_add(1, Ordering::Relaxed) + 1;
             let playback_generation = Arc::clone(&self.playback_generation);
             thread::spawn(move || match decode_file(&path) {
@@ -263,5 +271,45 @@ impl KanonoApp {
             self.queued_track_ids.remove(0);
             self.play_track(track_id);
         }
+    }
+
+    fn toggle_playback(&mut self) {
+        if self.is_playing { self.pause_playback(); } else { self.resume_playback(); }
+    }
+
+    fn resume_playback(&mut self) {
+        if let Some(audio_output) = &self.audio_output {
+            if let Err(error) = audio_output.play() {
+                eprintln!("unable to resume audio output: {error}");
+                return;
+            }
+        }
+        self.is_playing = true;
+        self.mpris_state.set_playing(true);
+    }
+
+    fn pause_playback(&mut self) {
+        if let Some(audio_output) = &self.audio_output {
+            if let Err(error) = audio_output.pause() {
+                eprintln!("unable to pause audio output: {error}");
+                return;
+            }
+        }
+        self.is_playing = false;
+        self.mpris_state.set_playing(false);
+    }
+
+    fn stop_playback(&mut self) {
+        self.playback_generation.fetch_add(1, Ordering::Relaxed);
+        if let Some(audio_output) = &self.audio_output {
+            audio_output.queue.clear();
+            audio_output.reset_position();
+            if let Err(error) = audio_output.pause() {
+                eprintln!("unable to stop audio output: {error}");
+            }
+        }
+        self.is_playing = false;
+        self.playback.elapsed = Duration::ZERO;
+        self.mpris_state.set_playing(false);
     }
 }

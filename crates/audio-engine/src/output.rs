@@ -129,7 +129,6 @@ impl AudioOutput {
             move |error| eprintln!("audio output error: {error}"),
             None,
         )?;
-        stream.play()?;
         Ok(Self { _stream: stream, queue, config, clock })
     }
 
@@ -144,5 +143,19 @@ impl AudioOutput {
 
     pub fn elapsed(&self) -> Duration {
         self.clock.position(self.config.sample_rate.0)
+    }
+
+    pub fn play(&self) -> Result<()> {
+        self._stream.play()?;
+        Ok(())
+    }
+
+    pub fn pause(&self) -> Result<()> {
+        self._stream.pause()?;
+        Ok(())
+    }
+
+    pub fn reset_position(&self) {
+        self.clock.reset();
     }
 }
