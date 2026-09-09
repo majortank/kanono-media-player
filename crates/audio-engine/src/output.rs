@@ -13,6 +13,10 @@ impl SampleQueue {
     pub fn push_interleaved(&self, samples: impl IntoIterator<Item = f32>) {
         self.0.lock().expect("audio queue poisoned").extend(samples);
     }
+
+    pub fn len(&self) -> usize {
+        self.0.lock().expect("audio queue poisoned").len()
+    }
 }
 
 /// Keeps the CPAL stream alive. The callback does no decoding or allocation.

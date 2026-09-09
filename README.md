@@ -15,6 +15,12 @@ The output callback consumes one interleaved f32 queue. Decode the successor and
 call `enqueue_track` before the current track drains: it appends rather than clears
 the queue, which preserves sample order across a track boundary.
 
+`GaplessQueueManager` is the playback-control boundary for transitions. Preload the
+current and successor with `preload_path` on a decode worker, then call `start`.
+The manager refuses to start a non-final track unless its successor's metadata and
+PCM are ready, and `promote_if_low_water` appends that successor at a two-second
+per-channel low-water mark without ever running decoding in CPAL's callback.
+
 `playback_state_channel` is a bounded crossbeam bridge from decode/audio workers to
 the iced thread. CPAL publishes position with `try_send`; decoded PCM is copied into
 fixed-size `Arc<[f32]>` visualizer windows off the real-time thread. The UI polls at
