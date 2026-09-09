@@ -15,6 +15,7 @@ version = "0.1.0"
 [workspace.dependencies]
 anyhow = "1.0"
 cpal = "0.15"
-iced = "0.12"
+crossbeam-channel = "0.5"
+iced = { version = "0.12", features = ["tokio"] }
 libloading = "0.8"
 symphonia = { version = "0.5.4", features = ["mp3", "flac", "wav", "pcm"] }

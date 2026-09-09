@@ -1,7 +1,9 @@
-use std::{fs::File, path::Path};
+use std::{fs::File, path::Path, sync::Arc};
 
 use anyhow::{Context, Result};
 use symphonia::core::{audio::{AudioBufferRef, SampleBuffer}, codecs::CODEC_TYPE_NULL, errors::Error, formats::FormatOptions, io::MediaSourceStream, meta::MetadataOptions, probe::Hint};
+
+use crate::playback_state::{PlaybackStateSender, VISUALIZER_WINDOW_SAMPLES};
 
 /// Decodes MP3, FLAC, and WAV into interleaved 32-bit float samples.
 pub fn decode_file(path: impl AsRef<Path>) -> Result<Vec<f32>> {
@@ -43,6 +45,13 @@ pub fn decode_file(path: impl AsRef<Path>) -> Result<Vec<f32>> {
         }
     }
     Ok(samples)
+}
+
+/// Publishes fixed-size PCM windows while decoding on a non-real-time worker.
+pub fn publish_visualizer_windows(samples: &[f32], sender: &PlaybackStateSender) {
+    for window in samples.chunks(VISUALIZER_WINDOW_SAMPLES) {
+        sender.publish_visualizer_pcm(Arc::from(window));
+    }
 }
 
 fn append_f32(samples: &mut Vec<f32>, decoded: AudioBufferRef<'_>) {

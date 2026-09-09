@@ -7,4 +7,5 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 cpal.workspace = true
+crossbeam-channel.workspace = true
 symphonia.workspace = true

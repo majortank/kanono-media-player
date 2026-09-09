@@ -15,6 +15,11 @@ The output callback consumes one interleaved f32 queue. Decode the successor and
 call `enqueue_track` before the current track drains: it appends rather than clears
 the queue, which preserves sample order across a track boundary.
 
+`playback_state_channel` is a bounded crossbeam bridge from decode/audio workers to
+the iced thread. CPAL publishes position with `try_send`; decoded PCM is copied into
+fixed-size `Arc<[f32]>` visualizer windows off the real-time thread. The UI polls at
+30 Hz and drains stale updates, so rendering never blocks audio output.
+
 Build the application with `cargo run -p kanono-player`. Build the example shared
 object with `cargo build -p kanono-example-component --release`; it is emitted under
 `target/release/` as `libkanono_example_component.so`.

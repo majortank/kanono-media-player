@@ -1,7 +1,9 @@
-use std::{collections::VecDeque, sync::{Arc, Mutex}};
+use std::{collections::VecDeque, sync::{Arc, Mutex}, time::Duration};
 
 use anyhow::{bail, Context, Result};
 use cpal::{traits::{DeviceTrait, HostTrait, StreamTrait}, SampleFormat, Stream, StreamConfig};
+
+use crate::playback_state::{PlaybackClock, PlaybackStateSender};
 
 /// Interleaved 32-bit floating point samples shared by the decode worker and callback.
 #[derive(Clone, Default)]
@@ -18,10 +20,11 @@ pub struct AudioOutput {
     _stream: Stream,
     pub queue: SampleQueue,
     pub config: StreamConfig,
+    pub clock: PlaybackClock,
 }
 
 impl AudioOutput {
-    pub fn open_default() -> Result<Self> {
+    pub fn open_default(state_sender: PlaybackStateSender) -> Result<Self> {
         let device = cpal::default_host()
             .default_output_device()
             .context("no default audio output device")?;
@@ -33,19 +36,26 @@ impl AudioOutput {
         let config = supported.with_max_sample_rate().config();
         let queue = SampleQueue::default();
         let callback_queue = queue.clone();
+        let clock = PlaybackClock::default();
+        let callback_clock = clock.clone();
+        let channels = usize::from(config.channels);
+        let sample_rate = config.sample_rate.0;
         let stream = device.build_output_stream(
             &config,
             move |output: &mut [f32], _| {
+                let frames = output.len() / channels;
                 let mut queued = callback_queue.0.lock().expect("audio queue poisoned");
-                for sample in output {
+                for sample in output.iter_mut() {
                     *sample = queued.pop_front().unwrap_or(0.0);
                 }
+                callback_clock.advance(frames as u64);
+                state_sender.publish_position(callback_clock.position(sample_rate));
             },
             move |error| eprintln!("audio output error: {error}"),
             None,
         )?;
         stream.play()?;
-        Ok(Self { _stream: stream, queue, config })
+        Ok(Self { _stream: stream, queue, config, clock })
     }
 
     /// Append a decoded track without clearing queued samples to preserve gapless order.
@@ -55,5 +65,9 @@ impl AudioOutput {
         }
         self.queue.push_interleaved(interleaved_f32);
         Ok(())
+    }
+
+    pub fn elapsed(&self) -> Duration {
+        self.clock.position(self.config.sample_rate.0)
     }
 }

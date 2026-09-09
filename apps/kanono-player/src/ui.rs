@@ -1,4 +1,7 @@
+use std::time::Duration;
+
 use iced::{widget::{button, column, container, row, text}, Alignment, Element, Length};
+use kanono_audio_engine::TrackMetadata;
 
 use crate::Message;
 
@@ -24,8 +27,8 @@ impl LayoutGrid {
     pub fn view<'a>(
         &'a self,
         playlist: impl Fn() -> Element<'static, Message>,
-        visualizer: impl Fn() -> Element<'static, Message>,
-        track_info: impl Fn() -> Element<'static, Message>,
+        visualizer: impl Fn() -> Element<'a, Message>,
+        track_info: impl Fn() -> Element<'a, Message>,
     ) -> Element<'a, Message> {
         let controls = row![
             button("Playlist").on_press(Message::Toggle(Panel::Playlist)),
@@ -49,14 +52,16 @@ impl Playlist {
 
 pub struct Visualizer;
 impl Visualizer {
-    pub fn view() -> Element<'static, Message> {
-        container(column![text("Visualizer"), text("Awaiting audio samples")].spacing(4)).into()
+    pub fn view(samples: &[f32]) -> Element<'_, Message> {
+        let peak = samples.iter().fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+        container(column![text("Visualizer"), text(format!("{} PCM samples | peak {:.3}", samples.len(), peak))].spacing(4)).into()
     }
 }
 
 pub struct TrackInfo;
 impl TrackInfo {
-    pub fn view() -> Element<'static, Message> {
-        container(column![text("Track Info"), text("Nothing playing")].spacing(4)).into()
+    pub fn view(metadata: &TrackMetadata, elapsed: Duration) -> Element<'_, Message> {
+        let title = if metadata.title.is_empty() { "Nothing playing" } else { &metadata.title };
+        container(column![text("Track Info"), text(title), text(format!("{} - {} | {:02}:{:02}", metadata.artist, metadata.album, elapsed.as_secs() / 60, elapsed.as_secs() % 60))].spacing(4)).into()
     }
 }
