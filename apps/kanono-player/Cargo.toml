@@ -1,0 +1,12 @@
+[package]
+name = "kanono-player"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+iced.workspace = true
+libloading.workspace = true
+kanono-audio-engine = { path = "../../crates/audio-engine" }
+kanono-plugin-api = { path = "../../crates/plugin-api" }

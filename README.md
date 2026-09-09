@@ -1,0 +1,29 @@
+# Kanono Media Player
+
+Kanono is a modular Arch Linux audio player foundation inspired by Foobar2000.
+
+## Workspace layout
+
+```text
+apps/kanono-player/          iced desktop application and dynamic plugin host
+crates/audio-engine/         Symphonia decoding and CPAL f32 output pipeline
+crates/plugin-api/           shared plugin trait and exported ABI signatures
+plugins/example-component/   example `.so` component (`cdylib`)
+```
+
+The output callback consumes one interleaved f32 queue. Decode the successor and
+call `enqueue_track` before the current track drains: it appends rather than clears
+the queue, which preserves sample order across a track boundary.
+
+Build the application with `cargo run -p kanono-player`. Build the example shared
+object with `cargo build -p kanono-example-component --release`; it is emitted under
+`target/release/` as `libkanono_example_component.so`.
+
+## Plugin contract
+
+Plugins export `kanono_plugin_api_version`, `kanono_create_plugin`, and
+`kanono_destroy_plugin`. The host loads them with `libloading`. These symbols use
+the Rust ABI because the shared `Plugin` trait crosses the library boundary, so
+plugins and host must use the same Rust toolchain and `kanono-plugin-api` version.
+A future independently distributed plugin SDK should use a C-compatible data ABI
+(for example `abi_stable`) instead.

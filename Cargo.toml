@@ -1,0 +1,20 @@
+[workspace]
+members = [
+    "crates/audio-engine",
+    "crates/plugin-api",
+    "apps/kanono-player",
+    "plugins/example-component",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+anyhow = "1.0"
+cpal = "0.15"
+iced = "0.12"
+libloading = "0.8"
+symphonia = { version = "0.5.4", features = ["mp3", "flac", "wav", "pcm"] }

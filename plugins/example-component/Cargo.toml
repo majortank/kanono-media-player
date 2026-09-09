@@ -1,0 +1,11 @@
+[package]
+name = "kanono-example-component"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+kanono-plugin-api = { path = "../../crates/plugin-api" }
