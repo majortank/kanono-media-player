@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Kanono Media Player
+GenericName=Audio Player
+Comment=Modular gapless audio player
+Exec=kanono-player
+Icon=kanono-media-player
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=music;audio;player;playlist;gapless;
+StartupNotify=true
+DBusActivatable=false

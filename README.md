@@ -70,3 +70,13 @@ Install `cargo-flamegraph`, then profile the Iced application with
 `cargo flamegraph --profile profiling --bin kanono-player`. To inspect rendering
 under a specific interaction, enable Design Mode before recording; use `perf record`
 or the generated flamegraph to distinguish Iced layout work from WGPU rendering.
+
+## Arch packaging
+
+`PKGBUILD` builds `kanono-player` with Cargo's locked dependency graph, runs the
+audio-engine test suite, and installs the binary, desktop entry, and scalable hicolor
+icon. It expects `kanono-media-player-0.1.0.tar.gz` beside the PKGBUILD; replace the
+local `source` entry and `url` placeholder with the canonical tagged release URL and
+checksum before publishing it to the AUR. The icon source is managed at
+`assets/icons/hicolor/scalable/apps/kanono-media-player.svg` and depicts Kanono as a
+tank with a musical note turret.
