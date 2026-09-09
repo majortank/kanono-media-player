@@ -8,6 +8,8 @@ use crate::playback_state::{PlaybackStateSender, TrackMetadata, VISUALIZER_WINDO
 pub struct DecodedTrack {
     pub metadata: TrackMetadata,
     pub samples: Vec<f32>,
+    pub sample_rate: u32,
+    pub channels: u16,
 }
 
 /// Decodes MP3, FLAC, and WAV into interleaved 32-bit float samples.
@@ -36,6 +38,8 @@ pub fn decode_track(path: impl AsRef<Path>) -> Result<DecodedTrack> {
         anyhow::bail!("file uses an unsupported audio codec");
     }
     let track_id = track.id;
+    let sample_rate = track.codec_params.sample_rate.context("audio stream is missing a sample rate")?;
+    let channels = track.codec_params.channels.context("audio stream is missing a channel layout")?.count() as u16;
     let mut metadata = TrackMetadata {
         title: path.file_stem().and_then(|name| name.to_str()).unwrap_or("Unknown title").to_owned(),
         ..TrackMetadata::default()
@@ -62,7 +66,7 @@ pub fn decode_track(path: impl AsRef<Path>) -> Result<DecodedTrack> {
             Err(error) => return Err(error.into()),
         }
     }
-    Ok(DecodedTrack { metadata, samples })
+    Ok(DecodedTrack { metadata, samples, sample_rate, channels })
 }
 
 /// Publishes fixed-size PCM windows while decoding on a non-real-time worker.

@@ -80,6 +80,8 @@ mod tests {
         DecodedTrack {
             metadata: TrackMetadata { title: title.to_owned(), ..TrackMetadata::default() },
             samples: vec![0.0, 0.0],
+            sample_rate: 48_000,
+            channels: 2,
         }
     }
 

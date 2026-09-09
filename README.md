@@ -27,6 +27,10 @@ Playlist view. MP3 `TagUpdate` batches write ID3v2.4 tags and mirrors the change
 the database transaction; FLAC and WAV remain read-only until their native tag writers
 are added.
 
+`ReplayGainWorker` performs EBU R128 / BS.1770 integrated-loudness and true-peak
+analysis on a dedicated background thread. It writes `REPLAYGAIN_TRACK_GAIN` and
+`REPLAYGAIN_TRACK_PEAK` ID3v2.4 `TXXX` tags for MP3 inputs, targeting -18 LUFS.
+
 `playback_state_channel` is a bounded crossbeam bridge from decode/audio workers to
 the iced thread. CPAL publishes position with `try_send`; decoded PCM is copied into
 fixed-size `Arc<[f32]>` visualizer windows off the real-time thread. The UI polls at
