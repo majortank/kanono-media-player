@@ -31,6 +31,12 @@ are added.
 analysis on a dedicated background thread. It writes `REPLAYGAIN_TRACK_GAIN` and
 `REPLAYGAIN_TRACK_PEAK` ID3v2.4 `TXXX` tags for MP3 inputs, targeting -18 LUFS.
 
+The player exposes `org.mpris.MediaPlayer2.kanono` on the user session bus for
+desktop media controls. `LatencyProfile::FixedFrames(n)` requests a CPAL buffer size
+that is supported by the selected device; for PipeWire, configure the server before
+launching Kanono, e.g. `PIPEWIRE_LATENCY=128/48000 cargo run -p kanono-player`.
+For JACK, select the desired server period/buffer before starting the app.
+
 `playback_state_channel` is a bounded crossbeam bridge from decode/audio workers to
 the iced thread. CPAL publishes position with `try_send`; decoded PCM is copied into
 fixed-size `Arc<[f32]>` visualizer windows off the real-time thread. The UI polls at

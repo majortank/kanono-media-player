@@ -1,3 +1,4 @@
+mod mpris;
 mod plugins;
 mod ui;
 
@@ -5,6 +6,7 @@ use std::{path::PathBuf, time::Duration};
 
 use iced::{executor, time, Application, Command, Element, Subscription, Theme};
 use kanono_audio_engine::{playback_state_channel, PlaybackStateReceiver, PlaybackUpdate, TrackMetadata};
+use mpris::{MprisCommand, MprisService, MprisState};
 use plugins::PluginRegistry;
 use ui::{LayoutGrid, Panel, Playlist, SplitAxis, TrackInfo, Visualizer};
 
@@ -16,6 +18,8 @@ struct KanonoApp {
     layout: LayoutGrid,
     playback: PlaybackViewState,
     playback_receiver: PlaybackStateReceiver,
+    mpris_commands: crossbeam_channel::Receiver<MprisCommand>,
+    mpris_state: MprisState,
     components: PluginRegistry,
 }
 
@@ -34,6 +38,7 @@ enum Message {
     DropPanelOn(Panel),
     SetSplitAxis(SplitAxis),
     PollPlayback,
+    PollMpris,
 }
 
 impl Application for KanonoApp {
@@ -45,11 +50,14 @@ impl Application for KanonoApp {
     fn new(_flags: ()) -> (Self, Command<Message>) {
         let (_playback_sender, playback_receiver) = playback_state_channel();
         let components = PluginRegistry::load_components(component_directory());
+        let mpris = MprisService::spawn();
         (
             Self {
                 layout: LayoutGrid::default(),
                 playback: PlaybackViewState::default(),
                 playback_receiver,
+                mpris_commands: mpris.commands,
+                mpris_state: mpris.state,
                 components,
             },
             Command::none(),
@@ -72,6 +80,7 @@ impl Application for KanonoApp {
             Message::DropPanelOn(panel) => self.layout.drop_on(panel),
             Message::SetSplitAxis(axis) => self.layout.set_axis(axis),
             Message::PollPlayback => self.apply_playback_updates(),
+            Message::PollMpris => self.apply_mpris_commands(),
         }
         Command::none()
     }
@@ -85,7 +94,10 @@ impl Application for KanonoApp {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        time::every(Duration::from_millis(33)).map(|_| Message::PollPlayback)
+        Subscription::batch([
+            time::every(Duration::from_millis(33)).map(|_| Message::PollPlayback),
+            time::every(Duration::from_millis(100)).map(|_| Message::PollMpris),
+        ])
     }
 }
 
@@ -104,6 +116,17 @@ impl KanonoApp {
                 PlaybackUpdate::VisualizerPcm(samples) => {
                     self.playback.visualizer_pcm = samples.as_ref().to_vec();
                 }
+            }
+        }
+        self.mpris_state.set_metadata(self.playback.metadata.clone());
+    }
+
+    fn apply_mpris_commands(&mut self) {
+        for command in self.mpris_commands.try_iter() {
+            match command {
+                MprisCommand::Play => self.mpris_state.set_playing(true),
+                MprisCommand::Pause | MprisCommand::Stop => self.mpris_state.set_playing(false),
+                MprisCommand::Next | MprisCommand::Previous => {}
             }
         }
     }

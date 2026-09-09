@@ -23,3 +23,4 @@ libloading = "0.8"
 rusqlite = { version = "0.32", features = ["bundled"] }
 symphonia = { version = "0.5.4", features = ["mp3", "flac", "wav", "pcm"] }
 walkdir = "2.5"
+zbus = { version = "4.4", features = ["blocking"] }
