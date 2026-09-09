@@ -2,20 +2,19 @@ mod mpris;
 mod plugins;
 mod ui;
 
-use std::{path::{Path, PathBuf}, time::Duration};
+use std::{path::PathBuf, time::Duration};
 
 use iced::{executor, time, Application, Command, Element, Subscription, Theme};
 use kanono_audio_engine::{playback_state_channel, LibraryDatabase, LibraryTrack, PlaybackStateReceiver, PlaybackUpdate, TrackMetadata, TrackQuery};
 use mpris::{MprisCommand, MprisService, MprisState};
 use plugins::PluginRegistry;
-use ui::{player_view, LayoutGrid, Panel, SplitAxis};
+use ui::player_view;
 
 fn main() -> iced::Result {
     KanonoApp::run(iced::Settings::default())
 }
 
 struct KanonoApp {
-    layout: LayoutGrid,
     playback: PlaybackViewState,
     playback_receiver: PlaybackStateReceiver,
     mpris_commands: crossbeam_channel::Receiver<MprisCommand>,
@@ -40,11 +39,6 @@ struct PlaybackViewState {
 
 #[derive(Debug, Clone)]
 enum Message {
-    Toggle(Panel),
-    ToggleDesignMode,
-    BeginPanelDrag(Panel),
-    DropPanelOn(Panel),
-    SetSplitAxis(SplitAxis),
     PollPlayback,
     PollMpris,
     ImportFolder,
@@ -68,11 +62,10 @@ impl Application for KanonoApp {
         let (_playback_sender, playback_receiver) = playback_state_channel();
         let components = PluginRegistry::load_components(component_directory());
         let mpris = MprisService::spawn();
-        let mut library = LibraryDatabase::open(library_database_path()).expect("failed to open music library database");
+        let library = LibraryDatabase::open(library_database_path()).expect("failed to open music library database");
         let all_tracks = library.query(&TrackQuery::default()).unwrap_or_default();
         (
             Self {
-                layout: LayoutGrid::default(),
                 playback: PlaybackViewState::default(),
                 playback_receiver,
                 mpris_commands: mpris.commands,
@@ -101,11 +94,6 @@ impl Application for KanonoApp {
 
     fn update(&mut self, message: Message) -> Command<Message> {
         match message {
-            Message::Toggle(panel) => self.layout.toggle(panel),
-            Message::ToggleDesignMode => self.layout.toggle_design_mode(),
-            Message::BeginPanelDrag(panel) => self.layout.begin_drag(panel),
-            Message::DropPanelOn(panel) => self.layout.drop_on(panel),
-            Message::SetSplitAxis(axis) => self.layout.set_axis(axis),
             Message::PollPlayback => self.apply_playback_updates(),
             Message::PollMpris => self.apply_mpris_commands(),
             Message::ImportFolder => self.import_folder(),
@@ -162,7 +150,8 @@ impl KanonoApp {
     }
 
     fn apply_mpris_commands(&mut self) {
-        for command in self.mpris_commands.try_iter() {
+        let commands: Vec<_> = self.mpris_commands.try_iter().collect();
+        for command in commands {
             match command {
                 MprisCommand::Play => { self.is_playing = true; self.mpris_state.set_playing(true); }
                 MprisCommand::Pause | MprisCommand::Stop => { self.is_playing = false; self.mpris_state.set_playing(false); }
@@ -193,8 +182,13 @@ impl KanonoApp {
     }
 
     fn play_track(&mut self, track_id: i64) {
-        let Some(track) = self.all_tracks.iter().find(|track| track.id == track_id) else { return };
-        self.playback.metadata = TrackMetadata { title: track.title.clone(), artist: track.artist.clone(), album: track.album.clone(), duration: track.duration };
+        let Some(metadata) = self.all_tracks.iter().find(|track| track.id == track_id).map(|track| TrackMetadata {
+            title: track.title.clone(),
+            artist: track.artist.clone(),
+            album: track.album.clone(),
+            duration: track.duration,
+        }) else { return };
+        self.playback.metadata = metadata;
         self.selected_track = Some(track_id);
         self.is_playing = true;
         self.mpris_state.set_metadata(self.playback.metadata.clone());

@@ -43,6 +43,10 @@ pub struct LibraryDatabase {
 
 impl LibraryDatabase {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+            fs::create_dir_all(parent).with_context(|| format!("unable to create {}", parent.display()))?;
+        }
         let connection = Connection::open(path)?;
         connection.execute_batch(
             "
