@@ -1,12 +1,34 @@
 use std::{collections::BTreeSet, path::PathBuf, time::Duration};
 
 use iced::{
-    widget::{button, column, container, horizontal_space, row, scrollable, slider, text, text_input},
+    widget::{button, column, container, horizontal_space, row, scrollable, slider, svg, text, text_input},
     Alignment, Color, Element, Length,
 };
 use kanono_audio_engine::{LibraryTrack, TrackMetadata};
 
 use crate::{Message, NavTab};
+
+const LOGO_SVG: &[u8] = include_bytes!("../../../assets/icons/hicolor/scalable/apps/kanono-media-player.svg");
+const ICON_PLAY_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#ffffff"><polygon points="6,4 20,12 6,20"/></svg>"##;
+const ICON_PAUSE_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#ffffff"><rect x="5" y="4" width="4" height="16"/><rect x="15" y="4" width="4" height="16"/></svg>"##;
+const ICON_PREV_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#ffffff"><rect x="4" y="5" width="2.5" height="14"/><polygon points="20,5 8.5,12 20,19"/></svg>"##;
+const ICON_NEXT_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#ffffff"><polygon points="4,5 15.5,12 4,19"/><rect x="17.5" y="5" width="2.5" height="14"/></svg>"##;
+const ICON_SHUFFLE_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#cbd5e1"><path d="M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"/></svg>"##;
+const ICON_REPEAT_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#cbd5e1"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg>"##;
+const ICON_VOLUME_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#cbd5e1"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>"##;
+const ICON_MUTE_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#f87171"><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>"##;
+const ICON_DISC_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="#10b981"/><circle cx="12" cy="12" r="3.5" fill="#0f172a"/><circle cx="12" cy="12" r="1.5" fill="#6ee7b7"/></svg>"##;
+const ICON_FOLDER_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#94a3b8"><path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>"##;
+const ICON_LIBRARY_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#94a3b8"><path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H8V4h12v12z"/></svg>"##;
+const ICON_QUEUE_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#94a3b8"><path d="M15 6H3v2h12V6zm0 4H3v2h12v-2zM3 16h8v-2H3v2zM17 6v8.18c-.31-.11-.65-.18-1-.18-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3V8h3V6h-5z"/></svg>"##;
+const ICON_INFO_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#94a3b8"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/></svg>"##;
+
+fn svg_icon<'a, M: 'a>(data: &'static [u8], size: f32) -> Element<'a, M> {
+    svg(svg::Handle::from_memory(data))
+        .width(Length::Fixed(size))
+        .height(Length::Fixed(size))
+        .into()
+}
 
 pub struct ViewProps<'a> {
     pub tracks: &'a [LibraryTrack],
@@ -30,28 +52,47 @@ pub struct ViewProps<'a> {
 
 pub fn player_view<'a>(props: ViewProps<'a>) -> Element<'a, Message> {
     // --- TOP BAR ---
+    let logo_icon = svg(svg::Handle::from_memory(LOGO_SVG))
+        .width(Length::Fixed(28.0))
+        .height(Length::Fixed(28.0));
+
     let logo = row![
-        text("🎵").size(22),
+        logo_icon,
         text("KANONO").size(18).style(Color::from_rgb8(16, 185, 129)),
         text("PLAYER").size(18).style(Color::WHITE),
     ]
-    .spacing(6)
+    .spacing(8)
     .align_items(Alignment::Center);
 
-    let search_bar = text_input("🔍 Search music library by title, artist, album, genre...", props.search)
+    let search_bar = text_input("Search music library by title, artist, album, genre...", props.search)
         .on_input(Message::SearchChanged)
         .padding(9)
         .width(Length::Fill);
 
     let top_actions = row![
-        button(text("📁 Add Folder").size(13))
-            .on_press(Message::ImportFolder)
-            .padding([8, 14])
-            .style(btn_default_style()),
-        button(text("✨ Sample Audio").size(13))
-            .on_press(Message::GenerateSampleAudio)
-            .padding([8, 14])
-            .style(btn_accent_style()),
+        button(
+            row![
+                svg_icon(ICON_FOLDER_SVG, 15.0),
+                text("Add Folder").size(13),
+            ]
+            .spacing(6)
+            .align_items(Alignment::Center),
+        )
+        .on_press(Message::ImportFolder)
+        .padding([8, 14])
+        .style(btn_default_style()),
+
+        button(
+            row![
+                svg_icon(ICON_PLAY_SVG, 13.0),
+                text("Sample Audio").size(13).style(Color::WHITE),
+            ]
+            .spacing(6)
+            .align_items(Alignment::Center),
+        )
+        .on_press(Message::GenerateSampleAudio)
+        .padding([8, 14])
+        .style(btn_accent_style()),
     ]
     .spacing(8)
     .align_items(Alignment::Center);
@@ -106,7 +147,7 @@ fn render_sidebar<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
     let is_lib_active = props.current_tab == NavTab::Library && props.selected_folder.is_none();
     let lib_btn = button(
         row![
-            text("📚").size(14),
+            svg_icon(ICON_LIBRARY_SVG, 16.0),
             text("All Tracks").size(14).width(Length::Fill),
             text(format!("{}", props.all_tracks.len())).size(11).style(Color::from_rgb8(148, 163, 184)),
         ]
@@ -121,7 +162,7 @@ fn render_sidebar<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
     let is_queue_active = props.current_tab == NavTab::Queue;
     let queue_btn = button(
         row![
-            text("📑").size(14),
+            svg_icon(ICON_QUEUE_SVG, 16.0),
             text("Play Queue").size(14).width(Length::Fill),
             text(format!("{}", props.queued_track_ids.len())).size(11).style(Color::from_rgb8(148, 163, 184)),
         ]
@@ -136,7 +177,7 @@ fn render_sidebar<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
     let is_info_active = props.current_tab == NavTab::Info;
     let info_btn = button(
         row![
-            text("⚙️").size(14),
+            svg_icon(ICON_INFO_SVG, 16.0),
             text("Audio & System").size(14).width(Length::Fill),
         ]
         .spacing(8)
@@ -159,7 +200,7 @@ fn render_sidebar<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
         folder_buttons = folder_buttons.push(
             button(
                 row![
-                    text("📂").size(12),
+                    svg_icon(ICON_FOLDER_SVG, 14.0),
                     text(label).size(13).width(Length::Fill),
                 ]
                 .spacing(6)
@@ -194,20 +235,34 @@ fn render_track_list<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
     if props.all_tracks.is_empty() {
         return container(
             column![
-                text("🎵").size(48),
+                svg_icon(LOGO_SVG, 64.0),
                 text("Your Music Library is Empty").size(24).style(Color::WHITE),
                 text("Add a music directory to index your songs, or generate sample audio tracks to test playback immediately.")
                     .size(14)
                     .style(Color::from_rgb8(148, 163, 184)),
                 row![
-                    button(text("✨ Generate Sample Audio Tracks").size(14))
-                        .on_press(Message::GenerateSampleAudio)
-                        .padding([10, 18])
-                        .style(btn_primary_style()),
-                    button(text("📁 Browse Music Folder").size(14))
-                        .on_press(Message::ImportFolder)
-                        .padding([10, 18])
-                        .style(btn_default_style()),
+                    button(
+                        row![
+                            svg_icon(ICON_PLAY_SVG, 14.0),
+                            text("Generate Sample Audio Tracks").size(14).style(Color::WHITE),
+                        ]
+                        .spacing(8)
+                        .align_items(Alignment::Center),
+                    )
+                    .on_press(Message::GenerateSampleAudio)
+                    .padding([10, 18])
+                    .style(btn_primary_style()),
+                    button(
+                        row![
+                            svg_icon(ICON_FOLDER_SVG, 15.0),
+                            text("Browse Music Folder").size(14),
+                        ]
+                        .spacing(8)
+                        .align_items(Alignment::Center),
+                    )
+                    .on_press(Message::ImportFolder)
+                    .padding([10, 18])
+                    .style(btn_default_style()),
                 ]
                 .spacing(12),
             ]
@@ -258,10 +313,14 @@ fn render_track_list<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
         let is_selected = props.selected_track == Some(track.id);
         let duration = track.duration.map(format_duration).unwrap_or_else(|| "--:--".into());
 
-        let icon = if is_playing {
-            text("▶").size(14).style(Color::from_rgb8(16, 185, 129))
+        let icon: Element<'a, Message> = if is_playing {
+            container(svg_icon(ICON_PLAY_SVG, 12.0))
+                .width(Length::Fixed(28.0))
+                .into()
         } else {
-            text(format!("{:02}", idx + 1)).size(13).style(Color::from_rgb8(100, 116, 139))
+            container(text(format!("{:02}", idx + 1)).size(13).style(Color::from_rgb8(100, 116, 139)))
+                .width(Length::Fixed(28.0))
+                .into()
         };
 
         let title_style = if is_playing {
@@ -274,15 +333,15 @@ fn render_track_list<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
 
         let row_btn = button(
             row![
-                icon.width(Length::Fixed(28.0)),
+                icon,
                 text(&track.title).width(Length::FillPortion(4)).size(14).style(title_style),
                 text(&track.artist).width(Length::FillPortion(3)).size(13).style(Color::from_rgb8(148, 163, 184)),
                 text(&track.album).width(Length::FillPortion(3)).size(13).style(Color::from_rgb8(148, 163, 184)),
                 text(duration).width(Length::Fixed(56.0)).size(13).style(Color::from_rgb8(148, 163, 184)),
                 row![
-                    button(text("▶").size(11))
+                    button(svg_icon(ICON_PLAY_SVG, 10.0))
                         .on_press(Message::PlayTrack(track.id))
-                        .padding([4, 8])
+                        .padding([5, 8])
                         .style(btn_play_row_style()),
                     button(text("+Q").size(11))
                         .on_press(Message::QueueTrack(track.id))
@@ -326,7 +385,12 @@ fn render_track_list<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
 
 fn render_queue_list<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
     let header = row![
-        text("📑 Current Playback Queue").size(20).style(Color::WHITE),
+        row![
+            svg_icon(ICON_QUEUE_SVG, 20.0),
+            text("Current Playback Queue").size(20).style(Color::WHITE),
+        ]
+        .spacing(8)
+        .align_items(Alignment::Center),
         horizontal_space(),
         button(text("Clear Queue").size(12))
             .on_press(Message::ClearQueue)
@@ -370,10 +434,17 @@ fn render_queue_list<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
                 text(title).size(14).style(Color::WHITE).width(Length::FillPortion(4)),
                 text(artist).size(13).style(Color::from_rgb8(148, 163, 184)).width(Length::FillPortion(3)),
                 text(dur).size(13).style(Color::from_rgb8(148, 163, 184)).width(Length::Fixed(60.0)),
-                button(text("▶ Play").size(11))
-                    .on_press(Message::PlayTrack(track_id))
-                    .padding([4, 8])
-                    .style(btn_primary_style()),
+                button(
+                    row![
+                        svg_icon(ICON_PLAY_SVG, 10.0),
+                        text("Play").size(11).style(Color::WHITE),
+                    ]
+                    .spacing(4)
+                    .align_items(Alignment::Center),
+                )
+                .on_press(Message::PlayTrack(track_id))
+                .padding([4, 8])
+                .style(btn_primary_style()),
                 button(text("✕").size(11))
                     .on_press(Message::RemoveFromQueue(q_idx))
                     .padding([4, 8])
@@ -402,7 +473,12 @@ fn render_queue_list<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
 fn render_info_view<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
     container(
         column![
-            text("⚙️ Audio Engine & System Information").size(22).style(Color::WHITE),
+            row![
+                svg_icon(ICON_INFO_SVG, 20.0),
+                text("Audio Engine & System Information").size(22).style(Color::WHITE),
+            ]
+            .spacing(8)
+            .align_items(Alignment::Center),
             column![
                 text("Architecture & Specifications").size(16).style(Color::from_rgb8(52, 211, 153)),
                 text("• High-resolution gapless output pipeline via CPAL (PipeWire / ALSA / JACK)").size(13).style(Color::from_rgb8(203, 213, 225)),
@@ -416,8 +492,8 @@ fn render_info_view<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
                 text("Shortcuts & Controls").size(16).style(Color::from_rgb8(52, 211, 153)),
                 text("• Click any track to immediately start playback").size(13).style(Color::from_rgb8(203, 213, 225)),
                 text("• Drag the progress slider to scrub / seek in the track").size(13).style(Color::from_rgb8(203, 213, 225)),
-                text("• Toggle 🔀 for Shuffle and 🔁 for Repeat").size(13).style(Color::from_rgb8(203, 213, 225)),
-                text("• Adjust the volume slider or click 🔊 to mute/unmute").size(13).style(Color::from_rgb8(203, 213, 225)),
+                text("• Toggle Shuffle and Repeat modes from the bottom controls").size(13).style(Color::from_rgb8(203, 213, 225)),
+                text("• Adjust the volume slider or click the speaker icon to mute/unmute").size(13).style(Color::from_rgb8(203, 213, 225)),
             ].spacing(6),
         ]
         .spacing(18),
@@ -443,7 +519,7 @@ fn render_transport_bar<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
     };
 
     let now_playing_info = row![
-        container(text("💿").size(24))
+        container(svg_icon(ICON_DISC_SVG, 22.0))
             .padding([8, 10])
             .style(badge_container_style()),
         column![
@@ -457,33 +533,72 @@ fn render_transport_bar<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
     .width(Length::Fixed(240.0));
 
     // Center: Playback Buttons + Seek Slider
-    let prev_btn = button(text("⏮").size(16))
-        .on_press(Message::Previous)
-        .padding([6, 12])
-        .style(btn_default_style());
+    let prev_btn = button(
+        row![
+            svg_icon(ICON_PREV_SVG, 13.0),
+            text("Prev").size(12),
+        ]
+        .spacing(4)
+        .align_items(Alignment::Center),
+    )
+    .on_press(Message::Previous)
+    .padding([6, 12])
+    .style(btn_default_style());
 
-    let play_pause_icon = if props.is_playing { "⏸" } else { "▶" };
-    let play_btn = button(text(play_pause_icon).size(18))
-        .on_press(Message::TogglePlayback)
-        .padding([8, 18])
-        .style(btn_primary_style());
+    let (play_pause_svg, play_pause_label) = if props.is_playing {
+        (ICON_PAUSE_SVG, "Pause")
+    } else {
+        (ICON_PLAY_SVG, "Play")
+    };
+    let play_btn = button(
+        row![
+            svg_icon(play_pause_svg, 14.0),
+            text(play_pause_label).size(13).style(Color::WHITE),
+        ]
+        .spacing(6)
+        .align_items(Alignment::Center),
+    )
+    .on_press(Message::TogglePlayback)
+    .padding([8, 18])
+    .style(btn_primary_style());
 
-    let next_btn = button(text("⏭").size(16))
-        .on_press(Message::Next)
-        .padding([6, 12])
-        .style(btn_default_style());
+    let next_btn = button(
+        row![
+            text("Next").size(12),
+            svg_icon(ICON_NEXT_SVG, 13.0),
+        ]
+        .spacing(4)
+        .align_items(Alignment::Center),
+    )
+    .on_press(Message::Next)
+    .padding([6, 12])
+    .style(btn_default_style());
 
     let shuffle_style = if props.is_shuffled { btn_active_toggle_style() } else { btn_default_style() };
-    let shuffle_btn = button(text("🔀").size(14))
-        .on_press(Message::ToggleShuffle)
-        .padding([6, 10])
-        .style(shuffle_style);
+    let shuffle_btn = button(
+        row![
+            svg_icon(ICON_SHUFFLE_SVG, 13.0),
+            text("Shuffle").size(11),
+        ]
+        .spacing(4)
+        .align_items(Alignment::Center),
+    )
+    .on_press(Message::ToggleShuffle)
+    .padding([6, 10])
+    .style(shuffle_style);
 
     let repeat_style = if props.is_repeated { btn_active_toggle_style() } else { btn_default_style() };
-    let repeat_btn = button(text("🔁").size(14))
-        .on_press(Message::ToggleRepeat)
-        .padding([6, 10])
-        .style(repeat_style);
+    let repeat_btn = button(
+        row![
+            svg_icon(ICON_REPEAT_SVG, 13.0),
+            text("Repeat").size(11),
+        ]
+        .spacing(4)
+        .align_items(Alignment::Center),
+    )
+    .on_press(Message::ToggleRepeat)
+    .padding([6, 10])
+    .style(repeat_style);
 
     let controls_row = row![shuffle_btn, prev_btn, play_btn, next_btn, repeat_btn]
         .spacing(8)
@@ -519,8 +634,12 @@ fn render_transport_bar<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
         .width(Length::Fill);
 
     // Right: Volume & Output Info
-    let mute_icon = if props.is_muted || props.volume == 0.0 { "🔇" } else { "🔊" };
-    let mute_btn = button(text(mute_icon).size(14))
+    let mute_svg = if props.is_muted || props.volume == 0.0 {
+        ICON_MUTE_SVG
+    } else {
+        ICON_VOLUME_SVG
+    };
+    let mute_btn = button(svg_icon(mute_svg, 16.0))
         .on_press(Message::ToggleMute)
         .padding([6, 8])
         .style(btn_default_style());

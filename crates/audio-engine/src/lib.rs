@@ -5,7 +5,7 @@ pub mod playback_state;
 pub mod queue_manager;
 pub mod replaygain;
 
-pub use decoder::{decode_file, decode_track, DecodedTrack};
+pub use decoder::{decode_file, decode_track, resample_and_remap_channels, DecodedTrack};
 pub use library::{LibraryDatabase, LibraryTrack, TagUpdate, TrackQuery};
 pub use output::{AudioOutput, LatencyProfile, SampleQueue};
 pub use playback_state::{playback_state_channel, PlaybackClock, PlaybackStateReceiver, PlaybackStateSender, PlaybackUpdate, TrackMetadata, VISUALIZER_WINDOW_SAMPLES};

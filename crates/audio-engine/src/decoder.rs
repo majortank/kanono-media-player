@@ -81,3 +81,114 @@ fn append_f32(samples: &mut Vec<f32>, decoded: AudioBufferRef<'_>) {
     buffer.copy_interleaved_ref(decoded);
     samples.extend_from_slice(buffer.samples());
 }
+
+/// Adapts decoded audio to the target output device's channel count and sample rate.
+pub fn resample_and_remap_channels(
+    samples: &[f32],
+    src_rate: u32,
+    src_channels: u16,
+    dst_rate: u32,
+    dst_channels: u16,
+) -> Vec<f32> {
+    if samples.is_empty() || src_channels == 0 || dst_channels == 0 {
+        return Vec::new();
+    }
+
+    // Step 1: Channel mapping
+    let remaped = if src_channels == dst_channels {
+        samples.to_vec()
+    } else if src_channels == 1 && dst_channels == 2 {
+        // Mono to Stereo: Duplicate sample to left and right channels
+        let mut out = Vec::with_capacity(samples.len() * 2);
+        for &s in samples {
+            out.push(s);
+            out.push(s);
+        }
+        out
+    } else if src_channels == 2 && dst_channels == 1 {
+        // Stereo to Mono: Average left and right
+        let mut out = Vec::with_capacity(samples.len() / 2);
+        for chunk in samples.chunks(2) {
+            let s = if chunk.len() == 2 { (chunk[0] + chunk[1]) * 0.5 } else { chunk[0] };
+            out.push(s);
+        }
+        out
+    } else if src_channels > dst_channels {
+        let ch = src_channels as usize;
+        let mut out = Vec::with_capacity((samples.len() / ch) * dst_channels as usize);
+        for frame in samples.chunks(ch) {
+            let avg: f32 = frame.iter().sum::<f32>() / frame.len() as f32;
+            for _ in 0..dst_channels {
+                out.push(avg);
+            }
+        }
+        out
+    } else {
+        let ch = src_channels as usize;
+        let mut out = Vec::with_capacity((samples.len() / ch) * dst_channels as usize);
+        for frame in samples.chunks(ch) {
+            for i in 0..dst_channels as usize {
+                out.push(frame[i % frame.len()]);
+            }
+        }
+        out
+    };
+
+    // Step 2: Sample rate resampling
+    if src_rate == dst_rate || src_rate == 0 || dst_rate == 0 {
+        return remaped;
+    }
+
+    let ch = dst_channels as usize;
+    let total_src_frames = remaped.len() / ch;
+    if total_src_frames == 0 {
+        return remaped;
+    }
+
+    let ratio = dst_rate as f64 / src_rate as f64;
+    let total_dst_frames = (total_src_frames as f64 * ratio).round() as usize;
+    let mut resampled = Vec::with_capacity(total_dst_frames * ch);
+
+    for dst_idx in 0..total_dst_frames {
+        let src_pos = dst_idx as f64 / ratio;
+        let src_idx = src_pos.floor() as usize;
+        let frac = (src_pos - src_idx as f64) as f32;
+
+        let next_idx = (src_idx + 1).min(total_src_frames - 1);
+        for c in 0..ch {
+            let s0 = remaped[src_idx * ch + c];
+            let s1 = remaped[next_idx * ch + c];
+            let interpolated = s0 + frac * (s1 - s0);
+            resampled.push(interpolated);
+        }
+    }
+
+    resampled
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_channel_mapping_mono_to_stereo() {
+        let mono = vec![0.5, -0.5, 0.2];
+        let stereo = resample_and_remap_channels(&mono, 44100, 1, 44100, 2);
+        assert_eq!(stereo, vec![0.5, 0.5, -0.5, -0.5, 0.2, 0.2]);
+    }
+
+    #[test]
+    fn test_channel_mapping_stereo_to_mono() {
+        let stereo = vec![0.4, 0.6, -0.2, -0.4];
+        let mono = resample_and_remap_channels(&stereo, 44100, 2, 44100, 1);
+        assert_eq!(mono, vec![0.5, -0.3]);
+    }
+
+    #[test]
+    fn test_sample_rate_resampling() {
+        let src = vec![0.0, 1.0, 0.0];
+        let resampled = resample_and_remap_channels(&src, 1000, 1, 2000, 1);
+        assert_eq!(resampled.len(), 6);
+        assert!((resampled[0] - 0.0).abs() < 1e-5);
+    }
+}

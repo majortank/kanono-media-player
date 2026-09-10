@@ -1,7 +1,7 @@
 use std::{sync::{atomic::{AtomicU32, AtomicU64, Ordering}, Arc}, thread, time::Duration};
 
 use anyhow::{bail, Context, Result};
-use cpal::{traits::{DeviceTrait, HostTrait, StreamTrait}, BufferSize, SampleFormat, Stream, StreamConfig, SupportedBufferSize};
+use cpal::{traits::{DeviceTrait, HostTrait, StreamTrait}, BufferSize, SampleFormat, Stream, StreamConfig};
 use crossbeam_queue::ArrayQueue;
 
 use crate::playback_state::{PlaybackClock, PlaybackStateSender};
@@ -59,13 +59,20 @@ impl SampleQueue {
         samples: impl IntoIterator<Item = f32>,
         mut should_continue: impl FnMut() -> bool,
     ) -> bool {
+        let mut spins = 0u32;
         for sample in samples {
             while self.0.push(sample).is_err() {
                 if !should_continue() {
                     return false;
                 }
-                thread::yield_now();
+                spins += 1;
+                if spins > 50 {
+                    thread::sleep(Duration::from_millis(2));
+                } else {
+                    thread::yield_now();
+                }
             }
+            spins = 0;
         }
         true
     }
@@ -119,26 +126,31 @@ impl AudioOutput {
         let device = cpal::default_host()
             .default_output_device()
             .context("no default audio output device")?;
-        let configs: Vec<_> = device.supported_output_configs().context("failed to inspect output configurations")?.collect();
-        let preferred = configs
-            .iter()
-            .find(|config| config.sample_format() == SampleFormat::F32)
-            .or_else(|| configs.iter().find(|config| matches!(config.sample_format(), SampleFormat::I16 | SampleFormat::U16)))
-            .context("default output device has no usable stream configuration")?;
-        let sample_format = preferred.sample_format();
-        let mut config = preferred.with_max_sample_rate().config();
+        let (mut config, sample_format) = if let Ok(default_cfg) = device.default_output_config() {
+            let format = default_cfg.sample_format();
+            (default_cfg.into(), format)
+        } else {
+            let configs: Vec<_> = device.supported_output_configs().context("failed to inspect output configurations")?.collect();
+            let preferred = configs
+                .iter()
+                .find(|config| config.channels() == 2 && config.sample_format() == SampleFormat::F32)
+                .or_else(|| configs.iter().find(|config| config.channels() == 2 && matches!(config.sample_format(), SampleFormat::I16 | SampleFormat::U16)))
+                .or_else(|| configs.iter().find(|config| config.sample_format() == SampleFormat::F32))
+                .or_else(|| configs.first())
+                .context("default output device has no usable stream configuration")?;
+            let sample_format = preferred.sample_format();
+            let sample_rate = if 44100 >= preferred.min_sample_rate().0 && 44100 <= preferred.max_sample_rate().0 {
+                cpal::SampleRate(44100)
+            } else if 48000 >= preferred.min_sample_rate().0 && 48000 <= preferred.max_sample_rate().0 {
+                cpal::SampleRate(48000)
+            } else {
+                preferred.min_sample_rate()
+            };
+            (preferred.with_sample_rate(sample_rate).config(), sample_format)
+        };
+
         if let LatencyProfile::FixedFrames(frames) = latency {
-            match preferred.buffer_size() {
-                SupportedBufferSize::Range { min, max } if frames >= *min && frames <= *max => {
-                    config.buffer_size = BufferSize::Fixed(frames);
-                }
-                SupportedBufferSize::Range { min, max } => {
-                    bail!("requested {frames} frames, but output supports {min} through {max}");
-                }
-                SupportedBufferSize::Unknown => {
-                    bail!("output device does not report fixed buffer-size support");
-                }
-            }
+            config.buffer_size = BufferSize::Fixed(frames);
         }
         let queue = SampleQueue::with_capacity(usize::from(config.channels) * config.sample_rate.0 as usize * 10);
         let callback_queue = queue.clone();
@@ -220,6 +232,7 @@ impl AudioOutput {
             )?,
             sample_format => bail!("unsupported audio format: {sample_format:?}"),
         };
+        let _ = stream.pause();
         Ok(Self { _stream: stream, queue, config, clock, volume })
     }
 

@@ -19,7 +19,7 @@ criterion = "0.5"
 crossbeam-channel = "0.5"
 crossbeam-queue = "0.3"
 ebur128 = "0.1"
-iced = { version = "0.12", features = ["tokio"] }
+iced = { version = "0.12", features = ["tokio", "svg", "image"] }
 id3 = "1.16"
 libloading = "0.8"
 rusqlite = { version = "0.32", features = ["bundled"] }

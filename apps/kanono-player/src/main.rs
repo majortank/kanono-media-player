@@ -16,8 +16,9 @@ use std::{
 
 use iced::{executor, time, Application, Command, Element, Subscription, Theme};
 use kanono_audio_engine::{
-    decode_file, playback_state_channel, AudioOutput, LibraryDatabase, LibraryTrack,
-    PlaybackStateReceiver, PlaybackStateSender, PlaybackUpdate, TrackMetadata, TrackQuery,
+    decode_track, playback_state_channel, resample_and_remap_channels, AudioOutput,
+    LibraryDatabase, LibraryTrack, PlaybackStateReceiver, PlaybackStateSender, PlaybackUpdate,
+    TrackMetadata, TrackQuery,
 };
 use mpris::{MprisCommand, MprisService, MprisState};
 use plugins::PluginRegistry;
@@ -446,6 +447,13 @@ impl KanonoApp {
         self.mpris_state.set_playing(true);
         self.playback_sender.publish_track(self.playback.metadata.clone());
 
+        if self.audio_output.is_none() {
+            if let Ok(output) = AudioOutput::open_default(self.playback_sender.clone()) {
+                output.set_volume(self.volume);
+                self.audio_output = Some(output);
+            }
+        }
+
         if let Some(audio_output) = &self.audio_output {
             let queue = audio_output.queue.clone();
             queue.clear();
@@ -459,11 +467,20 @@ impl KanonoApp {
 
             let generation = self.playback_generation.fetch_add(1, Ordering::Relaxed) + 1;
             let playback_generation = Arc::clone(&self.playback_generation);
+            let target_rate = audio_output.config.sample_rate.0;
+            let target_channels = audio_output.config.channels;
 
-            // Pre-decode into sample buffer for playback and seamless seeking
-            match decode_file(&path) {
-                Ok(samples) => {
-                    let samples_arc = Arc::new(samples);
+            // Pre-decode and resample into device format for playback and seamless seeking
+            match decode_track(&path) {
+                Ok(track) => {
+                    let resampled = resample_and_remap_channels(
+                        &track.samples,
+                        track.sample_rate,
+                        track.channels,
+                        target_rate,
+                        target_channels,
+                    );
+                    let samples_arc = Arc::new(resampled);
                     self.current_track_samples = Some(Arc::clone(&samples_arc));
                     let samples_to_push = samples_arc.as_ref().clone();
                     thread::spawn(move || {
@@ -490,8 +507,9 @@ impl KanonoApp {
             audio_output.set_position(target_duration);
 
             let sample_rate = audio_output.config.sample_rate.0 as usize;
-            let channels = usize::from(audio_output.config.channels);
-            let sample_offset = ((target_secs * sample_rate as f64 * channels as f64) as usize).min(samples.len());
+            let channels = usize::from(audio_output.config.channels).max(1);
+            let raw_offset = (target_secs * sample_rate as f64 * channels as f64) as usize;
+            let sample_offset = (raw_offset.min(samples.len())) / channels * channels;
             let remaining_samples = samples[sample_offset..].to_vec();
 
             let queue = audio_output.queue.clone();
