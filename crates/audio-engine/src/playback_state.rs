@@ -60,6 +60,11 @@ impl PlaybackStateReceiver {
     pub fn drain(&self) -> Vec<PlaybackUpdate> {
         self.receiver.try_iter().collect()
     }
+
+    /// Discards all pending updates in the channel.
+    pub fn clear(&self) {
+        while self.receiver.try_recv().is_ok() {}
+    }
 }
 
 /// Sample-accurate position shared from CPAL's callback without channel traffic.
@@ -81,5 +86,9 @@ impl PlaybackClock {
 
     pub fn set_frames(&self, frames: u64) {
         self.0.store(frames, Ordering::Relaxed);
+    }
+
+    pub fn played_frames(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
     }
 }

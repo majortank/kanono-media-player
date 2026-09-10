@@ -59,20 +59,18 @@ impl SampleQueue {
         samples: impl IntoIterator<Item = f32>,
         mut should_continue: impl FnMut() -> bool,
     ) -> bool {
-        let mut spins = 0u32;
+        let mut count = 0usize;
         for sample in samples {
+            count += 1;
+            if count % 512 == 0 && !should_continue() {
+                return false;
+            }
             while self.0.push(sample).is_err() {
                 if !should_continue() {
                     return false;
                 }
-                spins += 1;
-                if spins > 50 {
-                    thread::sleep(Duration::from_millis(2));
-                } else {
-                    thread::yield_now();
-                }
+                thread::sleep(Duration::from_millis(2));
             }
-            spins = 0;
         }
         true
     }
@@ -81,16 +79,28 @@ impl SampleQueue {
         self.0.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     pub fn clear(&self) {
         while self.0.pop().is_some() {}
     }
 
     /// The allocation-free PCM transfer used by the CPAL output callback.
+    /// Returns the number of samples actually drained from the queue.
     #[inline]
-    pub fn fill_output(&self, output: &mut [f32]) {
+    pub fn fill_output(&self, output: &mut [f32]) -> usize {
+        let mut popped = 0usize;
         for sample in output.iter_mut() {
-            *sample = self.0.pop().unwrap_or(0.0);
+            if let Some(val) = self.0.pop() {
+                *sample = val;
+                popped += 1;
+            } else {
+                *sample = 0.0;
+            }
         }
+        popped
     }
 
     #[inline]
@@ -166,23 +176,25 @@ impl AudioOutput {
             SampleFormat::F32 => device.build_output_stream(
                 &config,
                 move |output: &mut [f32], _| {
-                    let frames = output.len() / channels;
-                    callback_queue.fill_output(output);
+                    let popped = callback_queue.fill_output(output);
                     let vol = f32::from_bits(callback_volume.load(Ordering::Relaxed));
                     if (vol - 1.0).abs() > 0.001 {
                         for sample in output.iter_mut() {
                             *sample *= vol;
                         }
                     }
-                    let played_frames = callback_clock.advance(frames as u64);
-                    let update_interval = u64::from(sample_rate / 30).max(1);
-                    let last_update = callback_last_position_update.load(Ordering::Relaxed);
-                    if played_frames.saturating_sub(last_update) >= update_interval {
-                        callback_last_position_update.store(played_frames, Ordering::Relaxed);
-                        state_sender.publish_position(callback_clock.position(sample_rate));
-                        let win = output.len().min(512);
-                        if win > 0 {
-                            state_sender.publish_visualizer_pcm(Arc::from(&output[..win]));
+                    let actual_frames = (popped / channels) as u64;
+                    if actual_frames > 0 {
+                        let played_frames = callback_clock.advance(actual_frames);
+                        let update_interval = u64::from(sample_rate / 30).max(1);
+                        let last_update = callback_last_position_update.load(Ordering::Relaxed);
+                        if played_frames.saturating_sub(last_update) >= update_interval {
+                            callback_last_position_update.store(played_frames, Ordering::Relaxed);
+                            state_sender.publish_position(callback_clock.position(sample_rate));
+                            let win = output.len().min(512);
+                            if win > 0 {
+                                state_sender.publish_visualizer_pcm(Arc::from(&output[..win]));
+                            }
                         }
                     }
                 },
@@ -192,27 +204,35 @@ impl AudioOutput {
             SampleFormat::I16 => device.build_output_stream(
                 &config,
                 move |output: &mut [i16], _| {
-                    let frames = output.len() / channels;
                     let vol = f32::from_bits(callback_volume.load(Ordering::Relaxed));
+                    let mut popped = 0usize;
                     for sample in output.iter_mut() {
-                        let value = (callback_queue.0.pop().unwrap_or(0.0).clamp(-1.0, 1.0) * vol).clamp(-1.0, 1.0);
-                        let pcm = if value < 0.0 {
-                            (value * 32768.0).round().clamp(-32768.0, 32767.0) as i16
+                        if let Some(val) = callback_queue.0.pop() {
+                            popped += 1;
+                            let value = (val.clamp(-1.0, 1.0) * vol).clamp(-1.0, 1.0);
+                            let pcm = if value < 0.0 {
+                                (value * 32768.0).round().clamp(-32768.0, 32767.0) as i16
+                            } else {
+                                (value * 32767.0).round().clamp(-32768.0, 32767.0) as i16
+                            };
+                            *sample = pcm;
                         } else {
-                            (value * 32767.0).round().clamp(-32768.0, 32767.0) as i16
-                        };
-                        *sample = pcm;
+                            *sample = 0;
+                        }
                     }
-                    let played_frames = callback_clock.advance(frames as u64);
-                    let update_interval = u64::from(sample_rate / 30).max(1);
-                    let last_update = callback_last_position_update.load(Ordering::Relaxed);
-                    if played_frames.saturating_sub(last_update) >= update_interval {
-                        callback_last_position_update.store(played_frames, Ordering::Relaxed);
-                        state_sender.publish_position(callback_clock.position(sample_rate));
-                        let win = output.len().min(512);
-                        if win > 0 {
-                            let pcm_f32: Vec<f32> = output[..win].iter().map(|&s| s as f32 / 32768.0).collect();
-                            state_sender.publish_visualizer_pcm(Arc::from(pcm_f32.as_slice()));
+                    let actual_frames = (popped / channels) as u64;
+                    if actual_frames > 0 {
+                        let played_frames = callback_clock.advance(actual_frames);
+                        let update_interval = u64::from(sample_rate / 30).max(1);
+                        let last_update = callback_last_position_update.load(Ordering::Relaxed);
+                        if played_frames.saturating_sub(last_update) >= update_interval {
+                            callback_last_position_update.store(played_frames, Ordering::Relaxed);
+                            state_sender.publish_position(callback_clock.position(sample_rate));
+                            let win = output.len().min(512);
+                            if win > 0 {
+                                let pcm_f32: Vec<f32> = output[..win].iter().map(|&s| s as f32 / 32768.0).collect();
+                                state_sender.publish_visualizer_pcm(Arc::from(pcm_f32.as_slice()));
+                            }
                         }
                     }
                 },
@@ -222,22 +242,30 @@ impl AudioOutput {
             SampleFormat::U16 => device.build_output_stream(
                 &config,
                 move |output: &mut [u16], _| {
-                    let frames = output.len() / channels;
                     let vol = f32::from_bits(callback_volume.load(Ordering::Relaxed));
+                    let mut popped = 0usize;
                     for sample in output.iter_mut() {
-                        let value = callback_queue.0.pop().unwrap_or(0.0).clamp(-1.0, 1.0) * vol;
-                        *sample = ((value + 1.0) * u16::MAX as f32 / 2.0).round() as u16;
+                        if let Some(val) = callback_queue.0.pop() {
+                            popped += 1;
+                            let value = val.clamp(-1.0, 1.0) * vol;
+                            *sample = ((value + 1.0) * u16::MAX as f32 / 2.0).round() as u16;
+                        } else {
+                            *sample = 32768;
+                        }
                     }
-                    let played_frames = callback_clock.advance(frames as u64);
-                    let update_interval = u64::from(sample_rate / 30).max(1);
-                    let last_update = callback_last_position_update.load(Ordering::Relaxed);
-                    if played_frames.saturating_sub(last_update) >= update_interval {
-                        callback_last_position_update.store(played_frames, Ordering::Relaxed);
-                        state_sender.publish_position(callback_clock.position(sample_rate));
-                        let win = output.len().min(512);
-                        if win > 0 {
-                            let pcm_f32: Vec<f32> = output[..win].iter().map(|&s| (s as f32 / 32767.5) - 1.0).collect();
-                            state_sender.publish_visualizer_pcm(Arc::from(pcm_f32.as_slice()));
+                    let actual_frames = (popped / channels) as u64;
+                    if actual_frames > 0 {
+                        let played_frames = callback_clock.advance(actual_frames);
+                        let update_interval = u64::from(sample_rate / 30).max(1);
+                        let last_update = callback_last_position_update.load(Ordering::Relaxed);
+                        if played_frames.saturating_sub(last_update) >= update_interval {
+                            callback_last_position_update.store(played_frames, Ordering::Relaxed);
+                            state_sender.publish_position(callback_clock.position(sample_rate));
+                            let win = output.len().min(512);
+                            if win > 0 {
+                                let pcm_f32: Vec<f32> = output[..win].iter().map(|&s| (s as f32 / 32767.5) - 1.0).collect();
+                                state_sender.publish_visualizer_pcm(Arc::from(pcm_f32.as_slice()));
+                            }
                         }
                     }
                 },
@@ -261,6 +289,14 @@ impl AudioOutput {
 
     pub fn elapsed(&self) -> Duration {
         self.clock.position(self.config.sample_rate.0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    pub fn played_frames(&self) -> u64 {
+        self.clock.played_frames()
     }
 
     pub fn play(&self) -> Result<()> {

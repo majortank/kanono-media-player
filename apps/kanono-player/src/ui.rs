@@ -50,6 +50,7 @@ pub struct ViewProps<'a> {
     pub is_muted: bool,
     pub metadata: &'a TrackMetadata,
     pub elapsed: Duration,
+    pub seeking_fraction: Option<f32>,
     pub status_message: Option<&'a str>,
     pub visualizer_pcm: &'a [f32],
     pub current_track_gain: Option<ReplayGainResult>,
@@ -845,19 +846,26 @@ fn render_transport_bar<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
         .spacing(8)
         .align_items(Alignment::Center);
 
-    let total_secs = props.metadata.duration.map(|d| d.as_secs_f32()).unwrap_or(0.0);
-    let elapsed_secs = props.elapsed.as_secs_f32();
-    let seek_fraction = if total_secs > 0.0 {
-        (elapsed_secs / total_secs).clamp(0.0, 1.0)
+    let total_secs = props.metadata.duration.map(|d| d.as_secs_f64()).unwrap_or(0.0);
+    let (current_slider_val, display_duration) = if let Some(val) = props.seeking_fraction {
+        let scrubbed_secs = total_secs * (val as f64);
+        (val, Duration::from_secs_f64(scrubbed_secs))
     } else {
-        0.0
+        let elapsed_secs = props.elapsed.as_secs_f64();
+        let fraction = if total_secs > 0.0 {
+            (elapsed_secs / total_secs).clamp(0.0, 1.0) as f32
+        } else {
+            0.0
+        };
+        (fraction, props.elapsed)
     };
 
-    let elapsed_str = format_duration(props.elapsed);
+    let elapsed_str = format_duration(display_duration);
     let total_str = props.metadata.duration.map(format_duration).unwrap_or_else(|| "--:--".into());
 
-    let seek_slider = slider(0.0..=1.0, seek_fraction, Message::Seek)
-        .step(0.005_f32)
+    let seek_slider = slider(0.0..=1.0, current_slider_val, Message::SeekSlide)
+        .on_release(Message::SeekRelease)
+        .step(0.001_f32)
         .width(Length::Fill);
 
     let scrub_row = row![

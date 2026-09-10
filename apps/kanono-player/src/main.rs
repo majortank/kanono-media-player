@@ -15,6 +15,7 @@ use std::{
     time::Duration,
 };
 
+use crossbeam_channel::{Receiver, Sender};
 use iced::{executor, time, Application, Command, Element, Subscription, Theme};
 use kanono_audio_engine::{
     decode_track, playback_state_channel, resample_and_remap_channels, AudioOutput,
@@ -60,6 +61,30 @@ pub struct EditingTrackState {
     pub year: String,
 }
 
+#[derive(Clone)]
+struct PreloadedTrack {
+    track_id: i64,
+    metadata: TrackMetadata,
+    samples: Arc<Vec<f32>>,
+}
+
+enum DecodeEvent {
+    TrackReady {
+        generation: u64,
+        track_id: i64,
+        metadata: TrackMetadata,
+        samples: Arc<Vec<f32>>,
+        exact_duration: Duration,
+    },
+    PreloadReady {
+        for_playing_id: Option<i64>,
+        track_id: i64,
+        metadata: TrackMetadata,
+        samples: Arc<Vec<f32>>,
+        exact_duration: Duration,
+    },
+}
+
 pub struct KanonoApp {
     playback: PlaybackViewState,
     playback_sender: PlaybackStateSender,
@@ -85,7 +110,10 @@ pub struct KanonoApp {
     is_repeated: bool,
     replaygain_enabled: bool,
     gapless_enabled: bool,
-    preloaded_track_id: Option<i64>,
+    preloaded_track: Option<PreloadedTrack>,
+    seeking_fraction: Option<f32>,
+    decode_tx: Sender<DecodeEvent>,
+    decode_rx: Receiver<DecodeEvent>,
     track_gains: HashMap<PathBuf, ReplayGainResult>,
     replaygain_worker: Arc<ReplayGainWorker>,
     editing_track: Option<EditingTrackState>,
@@ -121,6 +149,8 @@ pub enum Message {
     TogglePlayback,
     Next,
     Previous,
+    SeekSlide(f32),
+    SeekRelease,
     Seek(f32),
     VolumeChanged(f32),
     ToggleMute,
@@ -160,6 +190,7 @@ impl Application for KanonoApp {
         let library = LibraryDatabase::open(library_database_path()).expect("failed to open music library database");
         let all_tracks = library.query(&TrackQuery::default()).unwrap_or_default();
         let replaygain_worker = Arc::new(ReplayGainWorker::spawn());
+        let (decode_tx, decode_rx) = crossbeam_channel::unbounded();
         (
             Self {
                 playback: PlaybackViewState::default(),
@@ -186,7 +217,10 @@ impl Application for KanonoApp {
                 is_repeated: false,
                 replaygain_enabled: true,
                 gapless_enabled: true,
-                preloaded_track_id: None,
+                preloaded_track: None,
+                seeking_fraction: None,
+                decode_tx,
+                decode_rx,
                 track_gains: HashMap::new(),
                 replaygain_worker,
                 editing_track: None,
@@ -212,7 +246,12 @@ impl Application for KanonoApp {
 
     fn update(&mut self, message: Message) -> Command<Message> {
         match message {
-            Message::PollPlayback => self.apply_playback_updates(),
+            Message::PollPlayback => {
+                while let Ok(event) = self.decode_rx.try_recv() {
+                    self.handle_decode_event(event);
+                }
+                self.apply_playback_updates();
+            }
             Message::PollMpris => self.apply_mpris_commands(),
             Message::ImportFolder => return Command::perform(pick_music_folder(), Message::FolderPicked),
             Message::FolderPicked(folder) => {
@@ -272,7 +311,16 @@ impl Application for KanonoApp {
             Message::Previous => {
                 self.play_previous();
             }
+            Message::SeekSlide(fraction) => {
+                self.seeking_fraction = Some(fraction.clamp(0.0, 1.0));
+            }
+            Message::SeekRelease => {
+                if let Some(fraction) = self.seeking_fraction.take() {
+                    self.seek_to(fraction);
+                }
+            }
             Message::Seek(fraction) => {
+                self.seeking_fraction = None;
                 self.seek_to(fraction);
             }
             Message::VolumeChanged(vol) => {
@@ -311,6 +359,11 @@ impl Application for KanonoApp {
             }
             Message::ToggleGapless => {
                 self.gapless_enabled = !self.gapless_enabled;
+                if !self.gapless_enabled {
+                    self.preloaded_track = None;
+                } else {
+                    self.maybe_preload_next_track();
+                }
                 self.status_message = Some(format!(
                     "Gapless Playback {}",
                     if self.gapless_enabled { "Enabled" } else { "Disabled" }
@@ -429,6 +482,7 @@ impl Application for KanonoApp {
             is_muted: self.is_muted,
             metadata: &self.playback.metadata,
             elapsed: self.playback.elapsed,
+            seeking_fraction: self.seeking_fraction,
             status_message: self.status_message.as_deref(),
             visualizer_pcm: &self.playback.visualizer_pcm,
             current_track_gain: self
@@ -587,6 +641,116 @@ impl KanonoApp {
         }
     }
 
+    fn handle_decode_event(&mut self, event: DecodeEvent) {
+        match event {
+            DecodeEvent::TrackReady {
+                generation,
+                track_id,
+                metadata,
+                samples,
+                exact_duration,
+            } => {
+                if self.playback_generation.load(Ordering::SeqCst) != generation {
+                    return;
+                }
+                self.playback.metadata = metadata;
+                self.playback.metadata.duration = Some(exact_duration);
+                self.current_track_samples = Some(Arc::clone(&samples));
+                self.current_playing_track_id = Some(track_id);
+                self.selected_track = Some(track_id);
+                self.playback.elapsed = Duration::ZERO;
+                self.is_playing = true;
+                self.mpris_state.set_metadata(self.playback.metadata.clone());
+                self.mpris_state.set_playing(true);
+                self.playback_sender.publish_track(self.playback.metadata.clone());
+
+                if let Some(output) = &self.audio_output {
+                    output.queue.clear();
+                    self.playback_receiver.clear();
+                    output.reset_position();
+                    let _ = output.play();
+
+                    let queue = output.queue.clone();
+                    let pb_gen = Arc::clone(&self.playback_generation);
+                    let samples_arc = Arc::clone(&samples);
+                    thread::spawn(move || {
+                        queue.push_interleaved_cancellable(samples_arc.iter().copied(), || {
+                            pb_gen.load(Ordering::SeqCst) == generation
+                        });
+                    });
+                }
+                self.maybe_preload_next_track();
+            }
+            DecodeEvent::PreloadReady {
+                for_playing_id,
+                track_id,
+                metadata,
+                samples,
+                exact_duration,
+            } => {
+                if self.current_playing_track_id == for_playing_id {
+                    let mut meta = metadata;
+                    meta.duration = Some(exact_duration);
+                    self.preloaded_track = Some(PreloadedTrack {
+                        track_id,
+                        metadata: meta,
+                        samples,
+                    });
+                }
+            }
+        }
+    }
+
+    fn maybe_preload_next_track(&mut self) {
+        if !self.gapless_enabled {
+            return;
+        }
+        if self.preloaded_track.is_some() {
+            return;
+        }
+        let Some(next_id) = self.peek_next_track_id() else { return };
+        if let Some(current_id) = self.current_playing_track_id {
+            if next_id == current_id && !self.is_repeated {
+                return;
+            }
+        }
+        let Some(next_track) = self.all_tracks.iter().find(|t| t.id == next_id) else { return };
+        let next_path = next_track.path.clone();
+        let next_meta = TrackMetadata {
+            title: next_track.title.clone(),
+            artist: next_track.artist.clone(),
+            album: next_track.album.clone(),
+            duration: next_track.duration,
+        };
+
+        let Some(output) = &self.audio_output else { return };
+        let target_rate = output.config.sample_rate.0;
+        let target_channels = output.config.channels;
+        let tx = self.decode_tx.clone();
+        let current_playing_id = self.current_playing_track_id;
+
+        thread::spawn(move || {
+            if let Ok(track) = decode_track(&next_path) {
+                let resampled = resample_and_remap_channels(
+                    &track.samples,
+                    track.sample_rate,
+                    track.channels,
+                    target_rate,
+                    target_channels,
+                );
+                let exact_frames = resampled.len() / usize::from(target_channels).max(1);
+                let exact_dur = Duration::from_secs_f64(exact_frames as f64 / f64::from(target_rate));
+                let _ = tx.send(DecodeEvent::PreloadReady {
+                    for_playing_id: current_playing_id,
+                    track_id: next_id,
+                    metadata: next_meta,
+                    samples: Arc::new(resampled),
+                    exact_duration: exact_dur,
+                });
+            }
+        });
+    }
+
     fn peek_next_track_id(&self) -> Option<i64> {
         if self.is_repeated {
             return self.current_playing_track_id;
@@ -603,13 +767,7 @@ impl KanonoApp {
             return None;
         }
         if self.is_shuffled {
-            use std::time::SystemTime;
-            let seed = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .subsec_nanos() as usize;
-            let random_idx = seed % track_list.len();
-            return Some(track_list[random_idx].id);
+            return None;
         }
         if let Some(current_id) = self.current_playing_track_id {
             if let Some(curr_idx) = track_list.iter().position(|t| t.id == current_id) {
@@ -618,40 +776,6 @@ impl KanonoApp {
             }
         }
         track_list.first().map(|t| t.id)
-    }
-
-    fn advance_to_preloaded(&mut self, next_id: i64) {
-        if !self.queued_track_ids.is_empty() && self.queued_track_ids[0] == next_id {
-            self.queued_track_ids.remove(0);
-        }
-        let Some((path, metadata)) = self.all_tracks.iter().find(|track| track.id == next_id).map(|track| {
-            (
-                track.path.clone(),
-                TrackMetadata {
-                    title: track.title.clone(),
-                    artist: track.artist.clone(),
-                    album: track.album.clone(),
-                    duration: track.duration,
-                },
-            )
-        }) else {
-            return;
-        };
-
-        self.playback.metadata = metadata;
-        self.playback.elapsed = Duration::ZERO;
-        self.selected_track = Some(next_id);
-        self.current_playing_track_id = Some(next_id);
-        self.mpris_state.set_metadata(self.playback.metadata.clone());
-        self.mpris_state.set_playing(true);
-        self.playback_sender.publish_track(self.playback.metadata.clone());
-        if let Some(output) = &self.audio_output {
-            output.reset_position();
-        }
-        self.apply_volume();
-        if !self.track_gains.contains_key(&path) {
-            let _ = self.replaygain_worker.enqueue(path);
-        }
     }
 
     fn apply_playback_updates(&mut self) {
@@ -667,50 +791,24 @@ impl KanonoApp {
         self.mpris_state.set_metadata(self.playback.metadata.clone());
 
         if self.is_playing {
-            if let Some(dur) = self.playback.metadata.duration {
-                if dur.as_secs() > 0 {
-                    // Gapless preloading: append next track when 3.5s remain
-                    if self.gapless_enabled && self.preloaded_track_id.is_none() {
-                        let remaining = dur.saturating_sub(self.playback.elapsed);
-                        if remaining <= Duration::from_millis(3500) && remaining > Duration::from_millis(500) {
-                            if let Some(next_id) = self.peek_next_track_id() {
-                                if let Some(next_track) = self.all_tracks.iter().find(|t| t.id == next_id) {
-                                    self.preloaded_track_id = Some(next_id);
-                                    let next_path = next_track.path.clone();
-                                    if let Some(output) = &self.audio_output {
-                                        let queue = output.queue.clone();
-                                        let target_rate = output.config.sample_rate.0;
-                                        let target_channels = output.config.channels;
-                                        let gen = self.playback_generation.load(Ordering::Relaxed);
-                                        let pb_gen = Arc::clone(&self.playback_generation);
-                                        thread::spawn(move || {
-                                            if let Ok(track) = decode_track(&next_path) {
-                                                let resampled = resample_and_remap_channels(
-                                                    &track.samples,
-                                                    track.sample_rate,
-                                                    track.channels,
-                                                    target_rate,
-                                                    target_channels,
-                                                );
-                                                queue.push_interleaved_cancellable(resampled, || {
-                                                    pb_gen.load(Ordering::Relaxed) == gen
-                                                });
-                                            }
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
+            if let (Some(output), Some(samples)) = (&self.audio_output, &self.current_track_samples) {
+                let channels = usize::from(output.config.channels).max(1);
+                let total_frames = (samples.len() / channels) as u64;
+                let played_frames = output.played_frames();
+                let queue_empty = output.is_empty();
 
-                    // Automatic track progression
-                    if self.playback.elapsed >= dur {
-                        if let Some(preloaded_id) = self.preloaded_track_id.take() {
-                            self.advance_to_preloaded(preloaded_id);
-                        } else {
-                            self.play_next();
-                        }
-                    }
+                // Track has finished playing when all frames have been played by CPAL or queue is empty near the end
+                let track_finished = total_frames > 0 && (
+                    played_frames >= total_frames || 
+                    (queue_empty && played_frames + (output.config.sample_rate.0 as u64 / 10) >= total_frames)
+                );
+
+                if track_finished {
+                    self.play_next();
+                }
+            } else if let Some(dur) = self.playback.metadata.duration {
+                if dur.as_secs() > 0 && self.playback.elapsed >= dur {
+                    self.play_next();
                 }
             }
         }
@@ -759,7 +857,6 @@ impl KanonoApp {
     }
 
     fn play_track(&mut self, track_id: i64) {
-        self.preloaded_track_id = None;
         let Some((path, metadata)) = self.all_tracks.iter().find(|track| track.id == track_id).map(|track| {
             (
                 track.path.clone(),
@@ -774,11 +871,12 @@ impl KanonoApp {
             return;
         };
 
-        self.playback.metadata = metadata;
-        self.playback.elapsed = Duration::ZERO;
         self.selected_track = Some(track_id);
         self.current_playing_track_id = Some(track_id);
         self.is_playing = true;
+        self.seeking_fraction = None;
+        self.playback.elapsed = Duration::ZERO;
+        self.playback.metadata = metadata.clone();
         self.mpris_state.set_metadata(self.playback.metadata.clone());
         self.mpris_state.set_playing(true);
         self.playback_sender.publish_track(self.playback.metadata.clone());
@@ -794,48 +892,87 @@ impl KanonoApp {
             let _ = self.replaygain_worker.enqueue(path.clone());
         }
 
-        if let Some(audio_output) = &self.audio_output {
-            let queue = audio_output.queue.clone();
-            queue.clear();
-            audio_output.reset_position();
-            if let Err(error) = audio_output.play() {
-                eprintln!("unable to start audio output: {error}");
-                self.is_playing = false;
-                self.mpris_state.set_playing(false);
-                return;
-            }
+        // Check if this track was already preloaded in memory
+        if let Some(preloaded) = self.preloaded_track.take() {
+            if preloaded.track_id == track_id {
+                let generation = self.playback_generation.fetch_add(1, Ordering::SeqCst) + 1;
+                let pb_gen = Arc::clone(&self.playback_generation);
 
-            let generation = self.playback_generation.fetch_add(1, Ordering::Relaxed) + 1;
-            let playback_generation = Arc::clone(&self.playback_generation);
-            let target_rate = audio_output.config.sample_rate.0;
-            let target_channels = audio_output.config.channels;
+                self.playback.metadata = preloaded.metadata;
+                self.current_track_samples = Some(Arc::clone(&preloaded.samples));
 
-            // Pre-decode and resample into device format for playback and seamless seeking
-            match decode_track(&path) {
-                Ok(track) => {
-                    let resampled = resample_and_remap_channels(
-                        &track.samples,
-                        track.sample_rate,
-                        track.channels,
-                        target_rate,
-                        target_channels,
-                    );
-                    let samples_arc = Arc::new(resampled);
-                    self.current_track_samples = Some(Arc::clone(&samples_arc));
-                    let samples_to_push = samples_arc.as_ref().clone();
+                if let Some(output) = &self.audio_output {
+                    output.queue.clear();
+                    self.playback_receiver.clear();
+                    output.reset_position();
+                    let _ = output.play();
+
+                    let queue = output.queue.clone();
+                    let samples_arc = Arc::clone(&preloaded.samples);
                     thread::spawn(move || {
-                        queue.push_interleaved_cancellable(samples_to_push, || {
-                            playback_generation.load(Ordering::Relaxed) == generation
+                        queue.push_interleaved_cancellable(samples_arc.iter().copied(), || {
+                            pb_gen.load(Ordering::SeqCst) == generation
                         });
                     });
                 }
-                Err(error) => eprintln!("unable to decode {}: {error}", path.display()),
+                self.maybe_preload_next_track();
+                return;
             }
+        }
+
+        // Invalidate previous workers and decode in background thread
+        self.preloaded_track = None;
+        self.current_track_samples = None;
+        let generation = self.playback_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let pb_gen = Arc::clone(&self.playback_generation);
+
+        if let Some(output) = &self.audio_output {
+            output.queue.clear();
+            self.playback_receiver.clear();
+            output.reset_position();
+            let _ = output.play();
+
+            let target_rate = output.config.sample_rate.0;
+            let target_channels = output.config.channels;
+            let tx = self.decode_tx.clone();
+
+            thread::spawn(move || {
+                if pb_gen.load(Ordering::SeqCst) != generation {
+                    return;
+                }
+                match decode_track(&path) {
+                    Ok(track) => {
+                        if pb_gen.load(Ordering::SeqCst) != generation {
+                            return;
+                        }
+                        let resampled = resample_and_remap_channels(
+                            &track.samples,
+                            track.sample_rate,
+                            track.channels,
+                            target_rate,
+                            target_channels,
+                        );
+                        if pb_gen.load(Ordering::SeqCst) != generation {
+                            return;
+                        }
+                        let exact_frames = resampled.len() / usize::from(target_channels).max(1);
+                        let exact_dur = Duration::from_secs_f64(exact_frames as f64 / f64::from(target_rate));
+                        let _ = tx.send(DecodeEvent::TrackReady {
+                            generation,
+                            track_id,
+                            metadata,
+                            samples: Arc::new(resampled),
+                            exact_duration: exact_dur,
+                        });
+                    }
+                    Err(error) => eprintln!("unable to decode {}: {error}", path.display()),
+                }
+            });
         }
     }
 
     fn seek_to(&mut self, fraction: f32) {
-        self.preloaded_track_id = None;
+        self.preloaded_track = None;
         let Some(duration) = self.playback.metadata.duration else { return };
         if duration.is_zero() { return; }
 
@@ -844,23 +981,28 @@ impl KanonoApp {
         self.playback.elapsed = target_duration;
 
         if let (Some(audio_output), Some(samples)) = (&self.audio_output, &self.current_track_samples) {
+            let generation = self.playback_generation.fetch_add(1, Ordering::SeqCst) + 1;
+            let playback_generation = Arc::clone(&self.playback_generation);
+
             audio_output.queue.clear();
+            self.playback_receiver.clear();
             audio_output.set_position(target_duration);
 
             let sample_rate = audio_output.config.sample_rate.0 as usize;
             let channels = usize::from(audio_output.config.channels).max(1);
             let raw_offset = (target_secs * sample_rate as f64 * channels as f64) as usize;
             let sample_offset = (raw_offset.min(samples.len())) / channels * channels;
-            let remaining_samples = samples[sample_offset..].to_vec();
 
             let queue = audio_output.queue.clone();
-            let generation = self.playback_generation.fetch_add(1, Ordering::Relaxed) + 1;
-            let playback_generation = Arc::clone(&self.playback_generation);
+            let samples_arc = Arc::clone(samples);
             thread::spawn(move || {
-                queue.push_interleaved_cancellable(remaining_samples, || {
-                    playback_generation.load(Ordering::Relaxed) == generation
+                let slice = &samples_arc[sample_offset..];
+                queue.push_interleaved_cancellable(slice.iter().copied(), || {
+                    playback_generation.load(Ordering::SeqCst) == generation
                 });
             });
+
+            self.maybe_preload_next_track();
         }
     }
 
@@ -916,10 +1058,8 @@ impl KanonoApp {
 
     fn play_previous(&mut self) {
         if self.playback.elapsed > Duration::from_secs(3) {
-            if let Some(id) = self.current_playing_track_id {
-                self.play_track(id);
-                return;
-            }
+            self.seek_to(0.0);
+            return;
         }
 
         let track_list = if !self.visible_tracks.is_empty() {
@@ -982,15 +1122,18 @@ impl KanonoApp {
     }
 
     fn stop_playback(&mut self) {
-        self.playback_generation.fetch_add(1, Ordering::Relaxed);
+        self.playback_generation.fetch_add(1, Ordering::SeqCst);
+        self.preloaded_track = None;
         if let Some(audio_output) = &self.audio_output {
             audio_output.queue.clear();
+            self.playback_receiver.clear();
             audio_output.reset_position();
             if let Err(error) = audio_output.pause() {
                 eprintln!("unable to stop audio output: {error}");
             }
         }
         self.is_playing = false;
+        self.seeking_fraction = None;
         self.playback.elapsed = Duration::ZERO;
         self.mpris_state.set_playing(false);
     }
@@ -1175,5 +1318,54 @@ mod tests {
 
         let _ = fs::remove_file(&wav_path);
         let _ = fs::remove_dir(&temp_dir);
+    }
+
+    #[test]
+    fn test_seeking_calculation_and_alignment() {
+        let duration = Duration::from_secs(180);
+        let sample_rate = 48_000usize;
+        let channels = 2usize;
+        let total_samples = 180 * sample_rate * channels;
+
+        let fraction = 0.5f32;
+        let target_secs = duration.as_secs_f64() * (fraction.clamp(0.0, 1.0) as f64);
+        let target_duration = Duration::from_secs_f64(target_secs);
+        assert_eq!(target_duration, Duration::from_secs(90));
+
+        let raw_offset = (target_secs * sample_rate as f64 * channels as f64) as usize;
+        let sample_offset = (raw_offset.min(total_samples)) / channels * channels;
+        // Verify channel alignment
+        assert_eq!(sample_offset % channels, 0);
+        assert_eq!(sample_offset, 90 * 48000 * 2);
+    }
+
+    #[test]
+    fn test_track_finished_detection_logic() {
+        let total_frames = 48000 * 180u64;
+        let played_frames = total_frames;
+        let queue_empty = true;
+        let sample_rate = 48000u64;
+
+        let track_finished = total_frames > 0 && (
+            played_frames >= total_frames || 
+            (queue_empty && played_frames + (sample_rate / 10) >= total_frames)
+        );
+        assert!(track_finished);
+
+        // Not finished when halfway
+        let played_half = total_frames / 2;
+        let track_not_finished = total_frames > 0 && (
+            played_half >= total_frames || 
+            (queue_empty && played_half + (sample_rate / 10) >= total_frames)
+        );
+        assert!(!track_not_finished);
+
+        // Finished when queue is empty and near EOF (within 100ms)
+        let played_near_eof = total_frames - 2000;
+        let near_eof_finished = total_frames > 0 && (
+            played_near_eof >= total_frames || 
+            (queue_empty && played_near_eof + (sample_rate / 10) >= total_frames)
+        );
+        assert!(near_eof_finished);
     }
 }
