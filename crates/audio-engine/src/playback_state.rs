@@ -30,7 +30,7 @@ pub struct PlaybackStateReceiver {
 }
 
 pub fn playback_state_channel() -> (PlaybackStateSender, PlaybackStateReceiver) {
-    let (sender, receiver) = bounded(8);
+    let (sender, receiver) = bounded(64);
     (PlaybackStateSender { sender }, PlaybackStateReceiver { receiver })
 }
 

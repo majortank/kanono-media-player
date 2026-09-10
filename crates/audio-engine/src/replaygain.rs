@@ -57,7 +57,7 @@ pub fn analyze_and_tag(path: impl AsRef<Path>) -> Result<ReplayGainResult> {
     let path = path.as_ref();
     let decoded = decode_track(path)?;
     let result = calculate_replaygain(&decoded.samples, decoded.channels, decoded.sample_rate)?;
-    write_replaygain_tags(path, result)?;
+    let _ = write_replaygain_tags(path, result);
     Ok(result)
 }
 

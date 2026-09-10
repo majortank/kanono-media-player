@@ -94,7 +94,19 @@ impl MprisRoot {
     fn supported_uri_schemes(&self) -> Vec<&str> { vec!["file"] }
 
     #[zbus(property)]
-    fn supported_mime_types(&self) -> Vec<&str> { vec!["audio/mpeg", "audio/flac", "audio/wav"] }
+    fn supported_mime_types(&self) -> Vec<&str> {
+        vec![
+            "audio/mpeg",
+            "audio/flac",
+            "audio/wav",
+            "audio/webm",
+            "audio/ogg",
+            "audio/mp4",
+            "audio/aac",
+            "audio/x-aiff",
+            "audio/x-caf",
+        ]
+    }
 }
 
 #[zbus::interface(name = "org.mpris.MediaPlayer2.Player")]
@@ -112,6 +124,26 @@ impl MprisPlayer {
     #[zbus(property)]
     fn playback_status(&self) -> &str {
         if self.state.inner.lock().expect("MPRIS state poisoned").playing { "Playing" } else { "Stopped" }
+    }
+
+    #[zbus(property)]
+    fn metadata(&self) -> std::collections::HashMap<String, zbus::zvariant::Value<'_>> {
+        let inner = self.state.inner.lock().expect("MPRIS state poisoned");
+        let mut map = std::collections::HashMap::new();
+        if !inner.metadata.title.is_empty() {
+            map.insert("xesam:title".to_string(), zbus::zvariant::Value::from(inner.metadata.title.clone()));
+        }
+        if !inner.metadata.artist.is_empty() {
+            map.insert("xesam:artist".to_string(), zbus::zvariant::Value::from(vec![inner.metadata.artist.clone()]));
+        }
+        if !inner.metadata.album.is_empty() {
+            map.insert("xesam:album".to_string(), zbus::zvariant::Value::from(inner.metadata.album.clone()));
+        }
+        if let Some(dur) = inner.metadata.duration {
+            map.insert("mpris:length".to_string(), zbus::zvariant::Value::from(dur.as_micros() as i64));
+        }
+        map.insert("mpris:trackid".to_string(), zbus::zvariant::Value::from("/org/kanono/Track/current"));
+        map
     }
 
     #[zbus(property)]

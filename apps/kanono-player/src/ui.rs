@@ -4,9 +4,9 @@ use iced::{
     widget::{button, column, container, horizontal_space, row, scrollable, slider, svg, text, text_input},
     Alignment, Color, Element, Length,
 };
-use kanono_audio_engine::{LibraryTrack, TrackMetadata};
+use kanono_audio_engine::{LibraryTrack, ReplayGainResult, TrackMetadata};
 
-use crate::{Message, NavTab};
+use crate::{plugins::RegisteredPlugin, EditField, EditingTrackState, Message, NavTab};
 
 const LOGO_SVG: &[u8] = include_bytes!("../../../assets/icons/hicolor/scalable/apps/kanono-media-player.svg");
 const ICON_PLAY_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#ffffff"><polygon points="6,4 20,12 6,20"/></svg>"##;
@@ -22,6 +22,7 @@ const ICON_FOLDER_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" view
 const ICON_LIBRARY_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#94a3b8"><path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H8V4h12v12z"/></svg>"##;
 const ICON_QUEUE_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#94a3b8"><path d="M15 6H3v2h12V6zm0 4H3v2h12v-2zM3 16h8v-2H3v2zM17 6v8.18c-.31-.11-.65-.18-1-.18-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3V8h3V6h-5z"/></svg>"##;
 const ICON_INFO_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#94a3b8"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/></svg>"##;
+const ICON_EDIT_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#94a3b8"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>"##;
 
 fn svg_icon<'a, M: 'a>(data: &'static [u8], size: f32) -> Element<'a, M> {
     svg(svg::Handle::from_memory(data))
@@ -42,12 +43,17 @@ pub struct ViewProps<'a> {
     pub is_playing: bool,
     pub is_shuffled: bool,
     pub is_repeated: bool,
+    pub replaygain_enabled: bool,
+    pub gapless_enabled: bool,
     pub volume: f32,
     pub is_muted: bool,
     pub metadata: &'a TrackMetadata,
     pub elapsed: Duration,
     pub status_message: Option<&'a str>,
-    pub component_count: usize,
+    pub visualizer_pcm: &'a [f32],
+    pub current_track_gain: Option<ReplayGainResult>,
+    pub editing_track: Option<&'a EditingTrackState>,
+    pub components: &'a [RegisteredPlugin],
 }
 
 pub fn player_view<'a>(props: ViewProps<'a>) -> Element<'a, Message> {
@@ -302,7 +308,7 @@ fn render_track_list<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
         text("ARTIST").width(Length::FillPortion(3)).style(Color::from_rgb8(100, 116, 139)),
         text("ALBUM").width(Length::FillPortion(3)).style(Color::from_rgb8(100, 116, 139)),
         text("TIME").width(Length::Fixed(60.0)).style(Color::from_rgb8(100, 116, 139)),
-        text("ACTIONS").width(Length::Fixed(90.0)).style(Color::from_rgb8(100, 116, 139)),
+        text("ACTIONS").width(Length::Fixed(120.0)).style(Color::from_rgb8(100, 116, 139)),
     ]
     .spacing(8)
     .padding([6, 10]);
@@ -347,9 +353,13 @@ fn render_track_list<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
                         .on_press(Message::QueueTrack(track.id))
                         .padding([4, 6])
                         .style(btn_queue_row_style()),
+                    button(svg_icon(ICON_EDIT_SVG, 11.0))
+                        .on_press(Message::StartEditTrack(track.id))
+                        .padding([4, 6])
+                        .style(btn_default_style()),
                 ]
                 .spacing(4)
-                .width(Length::Fixed(84.0)),
+                .width(Length::Fixed(116.0)),
             ]
             .spacing(8)
             .align_items(Alignment::Center),
@@ -368,18 +378,78 @@ fn render_track_list<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
         track_rows = track_rows.push(row_btn);
     }
 
+    let mut content = column![title_row].spacing(8);
+    if let Some(editing) = props.editing_track {
+        content = content.push(render_tag_editor(editing));
+    }
+    content = content.push(col_headers).push(scrollable(track_rows).height(Length::Fill));
+
+    container(content)
+        .padding(14)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(panel_container_style())
+        .into()
+}
+
+fn render_tag_editor<'a>(editing: &'a EditingTrackState) -> Element<'a, Message> {
+    let title_input = text_input("Track Title", &editing.title)
+        .on_input(|s| Message::EditFieldChanged(EditField::Title, s))
+        .padding(8);
+    let artist_input = text_input("Artist Name", &editing.artist)
+        .on_input(|s| Message::EditFieldChanged(EditField::Artist, s))
+        .padding(8);
+    let album_input = text_input("Album Name", &editing.album)
+        .on_input(|s| Message::EditFieldChanged(EditField::Album, s))
+        .padding(8);
+    let genre_input = text_input("Genre", &editing.genre)
+        .on_input(|s| Message::EditFieldChanged(EditField::Genre, s))
+        .padding(8);
+    let year_input = text_input("Year", &editing.year)
+        .on_input(|s| Message::EditFieldChanged(EditField::Year, s))
+        .padding(8)
+        .width(Length::Fixed(80.0));
+
+    let save_btn = button(
+        row![
+            svg_icon(ICON_EDIT_SVG, 13.0),
+            text("Save Tags").size(13).style(Color::WHITE),
+        ]
+        .spacing(6)
+        .align_items(Alignment::Center),
+    )
+    .on_press(Message::SaveTrackTags)
+    .padding([8, 16])
+    .style(btn_primary_style());
+
+    let cancel_btn = button(text("Cancel").size(13))
+        .on_press(Message::CancelEditTrack)
+        .padding([8, 14])
+        .style(btn_default_style());
+
     container(
         column![
-            title_row,
-            col_headers,
-            scrollable(track_rows).height(Length::Fill),
+            row![
+                svg_icon(ICON_EDIT_SVG, 16.0),
+                text("Mass Tag Engine — Edit Track Metadata").size(15).style(Color::WHITE),
+            ]
+            .spacing(8)
+            .align_items(Alignment::Center),
+            row![
+                column![text("Title").size(11).style(Color::from_rgb8(148, 163, 184)), title_input].spacing(4).width(Length::FillPortion(3)),
+                column![text("Artist").size(11).style(Color::from_rgb8(148, 163, 184)), artist_input].spacing(4).width(Length::FillPortion(2)),
+                column![text("Album").size(11).style(Color::from_rgb8(148, 163, 184)), album_input].spacing(4).width(Length::FillPortion(2)),
+                column![text("Genre").size(11).style(Color::from_rgb8(148, 163, 184)), genre_input].spacing(4).width(Length::FillPortion(2)),
+                column![text("Year").size(11).style(Color::from_rgb8(148, 163, 184)), year_input].spacing(4).width(Length::Fixed(80.0)),
+            ]
+            .spacing(10),
+            row![save_btn, cancel_btn].spacing(8),
         ]
-        .spacing(8),
+        .spacing(12),
     )
     .padding(14)
     .width(Length::Fill)
-    .height(Length::Fill)
-    .style(panel_container_style())
+    .style(card_container_style())
     .into()
 }
 
@@ -471,38 +541,161 @@ fn render_queue_list<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
 }
 
 fn render_info_view<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
-    container(
+    let title_row = row![
+        svg_icon(ICON_INFO_SVG, 20.0),
+        text("Audio Engine & System Information").size(22).style(Color::WHITE),
+    ]
+    .spacing(8)
+    .align_items(Alignment::Center);
+
+    // Audio Engine & DSP Specs
+    let rg_status = if props.replaygain_enabled { "Enabled (-18 LUFS)" } else { "Disabled" };
+    let gapless_status = if props.gapless_enabled { "Enabled (3.5s Lookahead)" } else { "Disabled" };
+
+    let dsp_specs = column![
+        text("Audio Processing Engine & DSP").size(16).style(Color::from_rgb8(52, 211, 153)),
+        row![
+            text("• Real-Time Audio Visualizer:").size(13).style(Color::from_rgb8(203, 213, 225)),
+            text("28-Band Spectrum streamed at 30 Hz PCM").size(13).style(Color::from_rgb8(148, 163, 184)),
+        ].spacing(6),
+        row![
+            text("• Loudness Normalization (EBU R128):").size(13).style(Color::from_rgb8(203, 213, 225)),
+            text(rg_status).size(13).style(if props.replaygain_enabled { Color::from_rgb8(52, 211, 153) } else { Color::from_rgb8(148, 163, 184) }),
+            button(text("Analyze Current / Selected Track Loudness").size(11))
+                .on_press(Message::AnalyzeReplayGain(None))
+                .padding([4, 8])
+                .style(btn_accent_style()),
+        ].spacing(8).align_items(Alignment::Center),
+        row![
+            text("• Gapless Audio Transitions:").size(13).style(Color::from_rgb8(203, 213, 225)),
+            text(gapless_status).size(13).style(if props.gapless_enabled { Color::from_rgb8(52, 211, 153) } else { Color::from_rgb8(148, 163, 184) }),
+        ].spacing(6),
+        text("• High-resolution pipeline via CPAL (PipeWire, ALSA, or PulseAudio)").size(13).style(Color::from_rgb8(203, 213, 225)),
+        text("• Sample-accurate position tracking with lock-free atomic clocks").size(13).style(Color::from_rgb8(203, 213, 225)),
+        text("• Real-time logarithmic volume attenuation & instantaneous seeking").size(13).style(Color::from_rgb8(203, 213, 225)),
+    ].spacing(8);
+
+    // Multi-format decoding specs
+    let format_specs = column![
+        text("Supported Multi-Format Audio Codecs (Symphonia)").size(16).style(Color::from_rgb8(52, 211, 153)),
+        text("• WebM / Matroska: .webm, .mkv (Opus, Vorbis, PCM audio)").size(13).style(Color::from_rgb8(203, 213, 225)),
+        text("• MPEG Audio: .mp3, .mp2, .mp1 (Layer I, II, III)").size(13).style(Color::from_rgb8(203, 213, 225)),
+        text("• Free Lossless Audio Codec: .flac (Native 16/24-bit lossless)").size(13).style(Color::from_rgb8(203, 213, 225)),
+        text("• Waveform Audio: .wav, .wave (Linear PCM, IEEE float)").size(13).style(Color::from_rgb8(203, 213, 225)),
+        text("• Ogg Bitstream: .ogg, .oga (Vorbis, Opus, FLAC)").size(13).style(Color::from_rgb8(203, 213, 225)),
+        text("• MP4 / Advanced Audio: .m4a, .m4b, .mp4, .aac (AAC, ALAC)").size(13).style(Color::from_rgb8(203, 213, 225)),
+        text("• Apple & Interchange: .aiff, .aif, .caf (AIFF, Core Audio Format)").size(13).style(Color::from_rgb8(203, 213, 225)),
+    ].spacing(6);
+
+    // Dynamic native components / plugins
+    let mut comp_rows = column![].spacing(6);
+    if props.components.is_empty() {
+        comp_rows = comp_rows.push(
+            text("No native components loaded. Place compiled .so dynamic libraries in the components/ folder.")
+                .size(13)
+                .style(Color::from_rgb8(148, 163, 184)),
+        );
+    } else {
+        for comp in props.components {
+            let row_card = container(
+                row![
+                    column![
+                        text(comp.metadata.name).size(14).style(Color::WHITE),
+                        text(format!("ID: {} • Version: {}", comp.metadata.id, comp.metadata.version))
+                            .size(12)
+                            .style(Color::from_rgb8(148, 163, 184)),
+                    ].spacing(2).width(Length::Fill),
+                    container(text("ACTIVE").size(11).style(Color::from_rgb8(52, 211, 153)))
+                        .padding([4, 8])
+                        .style(badge_container_style()),
+                ]
+                .align_items(Alignment::Center),
+            )
+            .padding([8, 12])
+            .width(Length::Fill)
+            .style(card_container_style());
+
+            comp_rows = comp_rows.push(row_card);
+        }
+    }
+
+    let components_section = column![
+        text(format!("Native Dynamic Components ({})", props.components.len())).size(16).style(Color::from_rgb8(52, 211, 153)),
+        comp_rows,
+    ].spacing(8);
+
+    let shortcuts_section = column![
+        text("Shortcuts & Controls").size(16).style(Color::from_rgb8(52, 211, 153)),
+        text("• Click any track to immediately start playback").size(13).style(Color::from_rgb8(203, 213, 225)),
+        text("• Click '+Q' to add songs to the playback queue").size(13).style(Color::from_rgb8(203, 213, 225)),
+        text("• Click the pencil icon to edit track metadata with the Mass Tagging engine").size(13).style(Color::from_rgb8(203, 213, 225)),
+        text("• Drag the progress slider to scrub or seek anywhere in the track").size(13).style(Color::from_rgb8(203, 213, 225)),
+        text("• Toggle RG (ReplayGain) or GAPLESS in the transport bar").size(13).style(Color::from_rgb8(203, 213, 225)),
+    ].spacing(6);
+
+    let scrollable_content = scrollable(
         column![
-            row![
-                svg_icon(ICON_INFO_SVG, 20.0),
-                text("Audio Engine & System Information").size(22).style(Color::WHITE),
-            ]
-            .spacing(8)
-            .align_items(Alignment::Center),
-            column![
-                text("Architecture & Specifications").size(16).style(Color::from_rgb8(52, 211, 153)),
-                text("• High-resolution gapless output pipeline via CPAL (PipeWire / ALSA / JACK)").size(13).style(Color::from_rgb8(203, 213, 225)),
-                text("• Pure multi-format audio decoding via Symphonia (MP3, FLAC, WAV, PCM)").size(13).style(Color::from_rgb8(203, 213, 225)),
-                text("• Sample-accurate position tracking with lock-free atomic playback clocks").size(13).style(Color::from_rgb8(203, 213, 225)),
-                text("• Real-time software volume scaling & instantaneous seeking").size(13).style(Color::from_rgb8(203, 213, 225)),
-                text("• EBU R128 Loudness normalization & ReplayGain tagging").size(13).style(Color::from_rgb8(203, 213, 225)),
-                text(format!("• Active Dynamic Components: {} loaded", props.component_count)).size(13).style(Color::from_rgb8(203, 213, 225)),
-            ].spacing(6),
-            column![
-                text("Shortcuts & Controls").size(16).style(Color::from_rgb8(52, 211, 153)),
-                text("• Click any track to immediately start playback").size(13).style(Color::from_rgb8(203, 213, 225)),
-                text("• Drag the progress slider to scrub / seek in the track").size(13).style(Color::from_rgb8(203, 213, 225)),
-                text("• Toggle Shuffle and Repeat modes from the bottom controls").size(13).style(Color::from_rgb8(203, 213, 225)),
-                text("• Adjust the volume slider or click the speaker icon to mute/unmute").size(13).style(Color::from_rgb8(203, 213, 225)),
-            ].spacing(6),
+            title_row,
+            dsp_specs,
+            format_specs,
+            components_section,
+            shortcuts_section,
         ]
-        .spacing(18),
+        .spacing(20),
     )
-    .padding(24)
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .style(panel_container_style())
-    .into()
+    .height(Length::Fill);
+
+    container(scrollable_content)
+        .padding(24)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(panel_container_style())
+        .into()
+}
+
+fn render_visualizer<'a>(pcm: &'a [f32], is_playing: bool) -> Element<'a, Message> {
+    const NUM_BARS: usize = 28;
+    const MAX_HEIGHT: f32 = 22.0;
+    const MIN_HEIGHT: f32 = 3.0;
+
+    let mut bars = row![].spacing(3).align_items(Alignment::End);
+
+    if !is_playing || pcm.is_empty() {
+        for _ in 0..NUM_BARS {
+            let bar = container(horizontal_space())
+                .width(Length::Fixed(4.0))
+                .height(Length::Fixed(MIN_HEIGHT))
+                .style(visualizer_bar_style(0.0));
+            bars = bars.push(bar);
+        }
+    } else {
+        let chunk_size = (pcm.len() / NUM_BARS).max(1);
+        for i in 0..NUM_BARS {
+            let start = i * chunk_size;
+            let end = (start + chunk_size).min(pcm.len());
+            let chunk = &pcm[start..end];
+            let mut sum_sq = 0.0_f32;
+            for &s in chunk {
+                sum_sq += s * s;
+            }
+            let rms = (sum_sq / chunk.len().max(1) as f32).sqrt();
+            let norm = (rms * 3.2).clamp(0.0, 1.0);
+            let height = MIN_HEIGHT + norm * (MAX_HEIGHT - MIN_HEIGHT);
+
+            let bar = container(horizontal_space())
+                .width(Length::Fixed(4.0))
+                .height(Length::Fixed(height))
+                .style(visualizer_bar_style(norm));
+            bars = bars.push(bar);
+        }
+    }
+
+    container(bars)
+        .padding([2, 4])
+        .height(Length::Fixed(MAX_HEIGHT + 4.0))
+        .align_x(iced::alignment::Horizontal::Center)
+        .align_y(iced::alignment::Vertical::Bottom)
+        .into()
 }
 
 fn render_transport_bar<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
@@ -518,15 +711,25 @@ fn render_transport_bar<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
         props.metadata.artist.as_str()
     };
 
+    let mut details_col = column![
+        text(track_title).size(14).style(Color::WHITE),
+        text(track_artist).size(12).style(Color::from_rgb8(148, 163, 184)),
+    ]
+    .spacing(2);
+
+    if let Some(gain) = props.current_track_gain {
+        let gain_sign = if gain.gain_db >= 0.0 { "+" } else { "" };
+        let gain_info = format!("RG: {}{:.1} dB ({:.1} LUFS)", gain_sign, gain.gain_db, gain.integrated_lufs);
+        details_col = details_col.push(
+            text(gain_info).size(10).style(Color::from_rgb8(52, 211, 153)),
+        );
+    }
+
     let now_playing_info = row![
         container(svg_icon(ICON_DISC_SVG, 22.0))
             .padding([8, 10])
             .style(badge_container_style()),
-        column![
-            text(track_title).size(15).style(Color::WHITE),
-            text(track_artist).size(12).style(Color::from_rgb8(148, 163, 184)),
-        ]
-        .spacing(2),
+        details_col,
     ]
     .spacing(12)
     .align_items(Alignment::Center)
@@ -600,7 +803,19 @@ fn render_transport_bar<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
     .padding([6, 10])
     .style(repeat_style);
 
-    let controls_row = row![shuffle_btn, prev_btn, play_btn, next_btn, repeat_btn]
+    let rg_style = if props.replaygain_enabled { btn_active_toggle_style() } else { btn_default_style() };
+    let rg_btn = button(text("RG").size(11))
+        .on_press(Message::ToggleReplayGain)
+        .padding([6, 8])
+        .style(rg_style);
+
+    let gapless_style = if props.gapless_enabled { btn_active_toggle_style() } else { btn_default_style() };
+    let gapless_btn = button(text("GAPLESS").size(10))
+        .on_press(Message::ToggleGapless)
+        .padding([6, 8])
+        .style(gapless_style);
+
+    let controls_row = row![shuffle_btn, prev_btn, play_btn, next_btn, repeat_btn, rg_btn, gapless_btn]
         .spacing(8)
         .align_items(Alignment::Center);
 
@@ -628,8 +843,10 @@ fn render_transport_bar<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
     .align_items(Alignment::Center)
     .width(Length::Fill);
 
-    let center_controls = column![controls_row, scrub_row]
-        .spacing(6)
+    let visualizer = render_visualizer(props.visualizer_pcm, props.is_playing);
+
+    let center_controls = column![visualizer, controls_row, scrub_row]
+        .spacing(4)
         .align_items(Alignment::Center)
         .width(Length::Fill);
 
@@ -1088,3 +1305,38 @@ impl iced::widget::button::StyleSheet for ActiveToggleButtonStyle {
         }
     }
 }
+
+fn visualizer_bar_style(ratio: f32) -> iced::theme::Container {
+    iced::theme::Container::Custom(Box::new(VisualizerBarStyle { ratio }))
+}
+
+struct VisualizerBarStyle {
+    ratio: f32,
+}
+
+impl iced::widget::container::StyleSheet for VisualizerBarStyle {
+    type Style = iced::Theme;
+    fn appearance(&self, _style: &Self::Style) -> iced::widget::container::Appearance {
+        let (r, g, b) = if self.ratio < 0.05 {
+            (51, 65, 85)
+        } else if self.ratio < 0.6 {
+            (16, 185, 129)
+        } else if self.ratio < 0.85 {
+            (6, 182, 212)
+        } else {
+            (245, 158, 11)
+        };
+
+        iced::widget::container::Appearance {
+            background: Some(Color::from_rgb8(r, g, b).into()),
+            text_color: Some(Color::WHITE),
+            border: iced::Border {
+                color: Color::TRANSPARENT,
+                width: 0.0,
+                radius: 2.0.into(),
+            },
+            shadow: iced::Shadow::default(),
+        }
+    }
+}
+

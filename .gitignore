@@ -11,3 +11,6 @@
 .env
 .env.*
 !.env.example
+
+# Compiled dynamic libraries
+*.so

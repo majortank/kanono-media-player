@@ -3,6 +3,12 @@ use std::{fs, path::{Path, PathBuf}, time::{Duration, UNIX_EPOCH}};
 use anyhow::{bail, Context, Result};
 use id3::{Tag, TagLike, Version};
 use rusqlite::{params, types::Value, Connection, OptionalExtension};
+use symphonia::core::{
+    formats::FormatOptions,
+    io::MediaSourceStream,
+    meta::{MetadataOptions, StandardTagKey},
+    probe::Hint,
+};
 use walkdir::WalkDir;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,20 +166,139 @@ impl LibraryDatabase {
 }
 
 fn read_track(path: &Path) -> Result<LibraryTrack> {
+    let default_title = path.file_stem().and_then(|value| value.to_str()).unwrap_or("Unknown title").to_owned();
     let mut track = LibraryTrack {
-        id: 0, path: path.to_owned(), title: path.file_stem().and_then(|value| value.to_str()).unwrap_or("Unknown title").to_owned(),
-        artist: String::new(), album: String::new(), genre: String::new(), year: None, track_number: None, duration: None,
+        id: 0,
+        path: path.to_owned(),
+        title: default_title.clone(),
+        artist: String::new(),
+        album: String::new(),
+        genre: String::new(),
+        year: None,
+        track_number: None,
+        duration: None,
     };
-    if path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("mp3")) {
-        if let Ok(tag) = Tag::read_from_path(path) {
-            track.title = tag.title().unwrap_or(&track.title).to_owned();
-            track.artist = tag.artist().unwrap_or_default().to_owned();
-            track.album = tag.album().unwrap_or_default().to_owned();
-            track.genre = tag.genre().unwrap_or_default().to_owned();
-            track.year = tag.year();
-            track.track_number = tag.track().map(|value| value as i32);
+
+    // 1. Extract metadata and duration using Symphonia format probe
+    if let Ok(file) = fs::File::open(path) {
+        let stream = MediaSourceStream::new(Box::new(file), Default::default());
+        let mut hint = Hint::new();
+        if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
+            hint.with_extension(ext);
+        }
+        if let Ok(mut probed) = symphonia::default::get_probe().format(
+            &hint,
+            stream,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        ) {
+            // Duration calculation from default audio track
+            if let Some(audio_track) = probed.format.default_track() {
+                if let (Some(time_base), Some(n_frames)) = (audio_track.codec_params.time_base, audio_track.codec_params.n_frames) {
+                    let duration = time_base.calc_time(n_frames);
+                    let secs = duration.seconds as f64 + f64::from(duration.frac);
+                    if secs > 0.0 {
+                        track.duration = Some(Duration::from_secs_f64(secs));
+                    }
+                }
+            }
+
+            // Extract tags from container / stream metadata
+            let mut extract_tags = |tags: &[symphonia::core::meta::Tag]| {
+                for tag in tags {
+                    let val = match &tag.value {
+                        symphonia::core::meta::Value::String(s) => s.trim().to_string(),
+                        val => val.to_string().trim().to_string(),
+                    };
+                    if val.is_empty() {
+                        continue;
+                    }
+                    match tag.std_key {
+                        Some(StandardTagKey::TrackTitle) => track.title = val,
+                        Some(StandardTagKey::Artist) => track.artist = val,
+                        Some(StandardTagKey::Album) => track.album = val,
+                        Some(StandardTagKey::Genre) => track.genre = val,
+                        Some(StandardTagKey::Date) | Some(StandardTagKey::ReleaseDate) => {
+                            if let Ok(year) = val.chars().take(4).collect::<String>().parse::<i32>() {
+                                track.year = Some(year);
+                            }
+                        }
+                        Some(StandardTagKey::TrackNumber) => {
+                            if let Ok(num) = val.split('/').next().unwrap_or("").trim().parse::<i32>() {
+                                track.track_number = Some(num);
+                            }
+                        }
+                        _ => {
+                            let k = tag.key.to_ascii_uppercase();
+                            if (k == "TITLE" || k == "TIT2") && (track.title.is_empty() || track.title == default_title) {
+                                track.title = val;
+                            } else if (k == "ARTIST" || k == "TPE1") && track.artist.is_empty() {
+                                track.artist = val;
+                            } else if (k == "ALBUM" || k == "TALB") && track.album.is_empty() {
+                                track.album = val;
+                            } else if (k == "GENRE" || k == "TCON") && track.genre.is_empty() {
+                                track.genre = val;
+                            }
+                        }
+                    }
+                }
+            };
+
+            if let Some(rev) = probed.metadata.get().as_ref().and_then(|m| m.current()) {
+                extract_tags(rev.tags());
+            }
+            if let Some(rev) = probed.format.metadata().current() {
+                extract_tags(rev.tags());
+            }
         }
     }
+
+    // 2. Fallback to ID3 for MP3 files or missing tags
+    if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("mp3")) || track.artist.is_empty() {
+        if let Ok(tag) = Tag::read_from_path(path) {
+            if let Some(title) = tag.title() {
+                if !title.is_empty() {
+                    track.title = title.to_owned();
+                }
+            }
+            if let Some(artist) = tag.artist() {
+                if !artist.is_empty() && track.artist.is_empty() {
+                    track.artist = artist.to_owned();
+                }
+            }
+            if let Some(album) = tag.album() {
+                if !album.is_empty() && track.album.is_empty() {
+                    track.album = album.to_owned();
+                }
+            }
+            if let Some(genre) = tag.genre() {
+                if !genre.is_empty() && track.genre.is_empty() {
+                    track.genre = genre.to_owned();
+                }
+            }
+            if track.year.is_none() {
+                track.year = tag.year();
+            }
+            if track.track_number.is_none() {
+                track.track_number = tag.track().map(|v| v as i32);
+            }
+            if track.duration.is_none() {
+                if let Some(dur_secs) = tag.duration() {
+                    if dur_secs > 0 {
+                        track.duration = Some(Duration::from_secs(dur_secs as u64));
+                    }
+                }
+            }
+        }
+    }
+
+    if track.artist.is_empty() {
+        track.artist = "Unknown Artist".to_string();
+    }
+    if track.album.is_empty() {
+        track.album = "Unknown Album".to_string();
+    }
+
     Ok(track)
 }
 
@@ -196,7 +321,12 @@ fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryTrack> {
 }
 
 fn is_supported(path: &Path) -> bool {
-    path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "mp3" | "flac" | "wav"))
+    path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| {
+        matches!(
+            extension.to_ascii_lowercase().as_str(),
+            "mp3" | "mp2" | "mp1" | "flac" | "wav" | "wave" | "webm" | "mkv" | "ogg" | "oga" | "m4a" | "m4b" | "mp4" | "aac" | "alac" | "aiff" | "aif" | "caf"
+        )
+    })
 }
 
 fn modification_seconds(path: &Path) -> Result<i64> {

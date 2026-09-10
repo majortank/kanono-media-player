@@ -1,7 +1,7 @@
 use std::{fs::File, path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
-use symphonia::core::{audio::{AudioBufferRef, SampleBuffer}, codecs::CODEC_TYPE_NULL, errors::Error, formats::FormatOptions, io::MediaSourceStream, meta::MetadataOptions, probe::Hint};
+use symphonia::core::{audio::{AudioBufferRef, SampleBuffer}, codecs::CODEC_TYPE_NULL, errors::Error, formats::FormatOptions, io::MediaSourceStream, meta::{MetadataOptions, StandardTagKey}, probe::Hint};
 
 use crate::playback_state::{PlaybackStateSender, TrackMetadata, VISUALIZER_WINDOW_SAMPLES};
 
@@ -26,29 +26,82 @@ pub fn decode_track(path: impl AsRef<Path>) -> Result<DecodedTrack> {
     if let Some(extension) = path.extension().and_then(|extension| extension.to_str()) {
         hint.with_extension(extension);
     }
-    let probed = symphonia::default::get_probe().format(
+    let mut probed = symphonia::default::get_probe().format(
         &hint,
         stream,
         &FormatOptions::default(),
         &MetadataOptions::default(),
     )?;
-    let mut format = probed.format;
-    let track = format.default_track().context("file has no default audio track")?;
-    if track.codec_params.codec == CODEC_TYPE_NULL {
-        anyhow::bail!("file uses an unsupported audio codec");
-    }
-    let track_id = track.id;
-    let sample_rate = track.codec_params.sample_rate.context("audio stream is missing a sample rate")?;
-    let channels = track.codec_params.channels.context("audio stream is missing a channel layout")?.count() as u16;
+
+    let default_title = path.file_stem().and_then(|name| name.to_str()).unwrap_or("Unknown title").to_owned();
     let mut metadata = TrackMetadata {
-        title: path.file_stem().and_then(|name| name.to_str()).unwrap_or("Unknown title").to_owned(),
-        ..TrackMetadata::default()
+        title: default_title.clone(),
+        artist: "Unknown Artist".to_owned(),
+        album: "Unknown Album".to_owned(),
+        duration: None,
     };
-    if let (Some(time_base), Some(frames)) = (track.codec_params.time_base, track.codec_params.n_frames) {
-        let duration = time_base.calc_time(frames);
-        metadata.duration = Some(Duration::from_secs_f64(duration.seconds as f64 + f64::from(duration.frac)));
+
+    let mut extract_meta = |tags: &[symphonia::core::meta::Tag]| {
+        for tag in tags {
+            let val = match &tag.value {
+                symphonia::core::meta::Value::String(s) => s.trim().to_string(),
+                val => val.to_string().trim().to_string(),
+            };
+            if val.is_empty() {
+                continue;
+            }
+            match tag.std_key {
+                Some(StandardTagKey::TrackTitle) => metadata.title = val,
+                Some(StandardTagKey::Artist) => metadata.artist = val,
+                Some(StandardTagKey::Album) => metadata.album = val,
+                _ => {
+                    let k = tag.key.to_ascii_uppercase();
+                    if (k == "TITLE" || k == "TIT2") && (metadata.title.is_empty() || metadata.title == default_title) {
+                        metadata.title = val;
+                    } else if (k == "ARTIST" || k == "TPE1") && (metadata.artist.is_empty() || metadata.artist == "Unknown Artist") {
+                        metadata.artist = val;
+                    } else if (k == "ALBUM" || k == "TALB") && (metadata.album.is_empty() || metadata.album == "Unknown Album") {
+                        metadata.album = val;
+                    }
+                }
+            }
+        }
+    };
+
+    if let Some(rev) = probed.metadata.get().as_ref().and_then(|m| m.current()) {
+        extract_meta(rev.tags());
     }
-    let mut decoder = symphonia::default::get_codecs().make(&track.codec_params, &Default::default())?;
+
+    let mut format = probed.format;
+    if let Some(rev) = format.metadata().current() {
+        extract_meta(rev.tags());
+    }
+
+    let (track_id, track_codec_params, mut sample_rate, mut channels, duration) = {
+        let track = format.default_track().context("file has no default audio track")?;
+        if track.codec_params.codec == CODEC_TYPE_NULL {
+            anyhow::bail!("file uses an unsupported audio codec");
+        }
+        let track_id = track.id;
+        let sample_rate = track.codec_params.sample_rate.unwrap_or(0);
+        let channels = track.codec_params.channels.map(|c| c.count() as u16).unwrap_or(0);
+        let duration = if let (Some(time_base), Some(frames)) = (track.codec_params.time_base, track.codec_params.n_frames) {
+            let dur = time_base.calc_time(frames);
+            let secs = dur.seconds as f64 + f64::from(dur.frac);
+            if secs > 0.0 {
+                Some(Duration::from_secs_f64(secs))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        (track_id, track.codec_params.clone(), sample_rate, channels, duration)
+    };
+    if duration.is_some() {
+        metadata.duration = duration;
+    }
+    let mut decoder = symphonia::default::get_codecs().make(&track_codec_params, &Default::default())?;
     let mut samples = Vec::new();
 
     loop {
@@ -61,11 +114,31 @@ pub fn decode_track(path: impl AsRef<Path>) -> Result<DecodedTrack> {
             continue;
         }
         match decoder.decode(&packet) {
-            Ok(decoded) => append_f32(&mut samples, decoded),
+            Ok(decoded) => {
+                if channels == 0 {
+                    channels = decoded.spec().channels.count() as u16;
+                }
+                if sample_rate == 0 {
+                    sample_rate = decoded.spec().rate;
+                }
+                append_f32(&mut samples, decoded);
+            }
             Err(Error::DecodeError(_)) => continue,
             Err(error) => return Err(error.into()),
         }
     }
+
+    if channels == 0 {
+        channels = decoder.codec_params().channels.map(|c| c.count() as u16).unwrap_or(2);
+    }
+    if sample_rate == 0 {
+        sample_rate = decoder.codec_params().sample_rate.unwrap_or(44100);
+    }
+    if metadata.duration.is_none() && sample_rate > 0 && channels > 0 && !samples.is_empty() {
+        let total_frames = samples.len() / usize::from(channels);
+        metadata.duration = Some(Duration::from_secs_f64(total_frames as f64 / f64::from(sample_rate)));
+    }
+
     Ok(DecodedTrack { metadata, samples, sample_rate, channels })
 }
 
@@ -190,5 +263,32 @@ mod tests {
         let resampled = resample_and_remap_channels(&src, 1000, 1, 2000, 1);
         assert_eq!(resampled.len(), 6);
         assert!((resampled[0] - 0.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_decode_webm_format() {
+        let temp_webm = std::env::temp_dir().join("kanono_test_track.webm");
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-f", "lavfi",
+                "-i", "sine=frequency=440:duration=1",
+                "-c:a", "libvorbis",
+                "-y",
+                temp_webm.to_str().unwrap(),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+
+        if let Ok(s) = status {
+            if s.success() {
+                let decoded = decode_track(&temp_webm).expect("WebM file should decode successfully");
+                assert!(decoded.sample_rate > 0);
+                assert!(decoded.channels > 0);
+                assert!(!decoded.samples.is_empty());
+                assert!(decoded.metadata.duration.is_some());
+                let _ = std::fs::remove_file(&temp_webm);
+            }
+        }
     }
 }

@@ -3,6 +3,7 @@ mod plugins;
 mod ui;
 
 use std::{
+    collections::HashMap,
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
@@ -18,7 +19,7 @@ use iced::{executor, time, Application, Command, Element, Subscription, Theme};
 use kanono_audio_engine::{
     decode_track, playback_state_channel, resample_and_remap_channels, AudioOutput,
     LibraryDatabase, LibraryTrack, PlaybackStateReceiver, PlaybackStateSender, PlaybackUpdate,
-    TrackMetadata, TrackQuery,
+    ReplayGainEvent, ReplayGainResult, ReplayGainWorker, TagUpdate, TrackMetadata, TrackQuery,
 };
 use mpris::{MprisCommand, MprisService, MprisState};
 use plugins::PluginRegistry;
@@ -38,6 +39,25 @@ pub enum NavTab {
     Queue,
     Folders,
     Info,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditField {
+    Title,
+    Artist,
+    Album,
+    Genre,
+    Year,
+}
+
+#[derive(Debug, Clone)]
+pub struct EditingTrackState {
+    pub track_id: i64,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub genre: String,
+    pub year: String,
 }
 
 pub struct KanonoApp {
@@ -63,6 +83,12 @@ pub struct KanonoApp {
     prev_volume: f32,
     is_shuffled: bool,
     is_repeated: bool,
+    replaygain_enabled: bool,
+    gapless_enabled: bool,
+    preloaded_track_id: Option<i64>,
+    track_gains: HashMap<PathBuf, ReplayGainResult>,
+    replaygain_worker: Arc<ReplayGainWorker>,
+    editing_track: Option<EditingTrackState>,
     current_track_samples: Option<Arc<Vec<f32>>>,
     status_message: Option<String>,
 }
@@ -78,6 +104,7 @@ struct PlaybackViewState {
 pub enum Message {
     PollPlayback,
     PollMpris,
+    PollReplayGain,
     ImportFolder,
     FolderPicked(Option<PathBuf>),
     LibraryIndexed(IndexResult),
@@ -97,6 +124,13 @@ pub enum Message {
     ToggleMute,
     ToggleShuffle,
     ToggleRepeat,
+    ToggleReplayGain,
+    ToggleGapless,
+    AnalyzeReplayGain(Option<i64>),
+    StartEditTrack(i64),
+    EditFieldChanged(EditField, String),
+    SaveTrackTags,
+    CancelEditTrack,
     GenerateSampleAudio,
     SampleAudioGenerated(Result<Vec<LibraryTrack>, String>),
 }
@@ -123,6 +157,7 @@ impl Application for KanonoApp {
         let mpris = MprisService::spawn();
         let library = LibraryDatabase::open(library_database_path()).expect("failed to open music library database");
         let all_tracks = library.query(&TrackQuery::default()).unwrap_or_default();
+        let replaygain_worker = Arc::new(ReplayGainWorker::spawn());
         (
             Self {
                 playback: PlaybackViewState::default(),
@@ -147,6 +182,12 @@ impl Application for KanonoApp {
                 prev_volume: 0.85,
                 is_shuffled: false,
                 is_repeated: false,
+                replaygain_enabled: true,
+                gapless_enabled: true,
+                preloaded_track_id: None,
+                track_gains: HashMap::new(),
+                replaygain_worker,
+                editing_track: None,
                 current_track_samples: None,
                 status_message: None,
             },
@@ -227,18 +268,14 @@ impl Application for KanonoApp {
             Message::VolumeChanged(vol) => {
                 self.volume = vol;
                 self.is_muted = vol == 0.0;
-                if let Some(output) = &self.audio_output {
-                    output.set_volume(vol);
-                }
+                self.apply_volume();
             }
             Message::ToggleMute => {
                 if self.is_muted {
                     self.is_muted = false;
                     let target = if self.prev_volume > 0.05 { self.prev_volume } else { 0.5 };
                     self.volume = target;
-                    if let Some(output) = &self.audio_output {
-                        output.set_volume(target);
-                    }
+                    self.apply_volume();
                 } else {
                     self.prev_volume = self.volume;
                     self.is_muted = true;
@@ -253,6 +290,93 @@ impl Application for KanonoApp {
             }
             Message::ToggleRepeat => {
                 self.is_repeated = !self.is_repeated;
+            }
+            Message::ToggleReplayGain => {
+                self.replaygain_enabled = !self.replaygain_enabled;
+                self.status_message = Some(format!(
+                    "Loudness Normalization {}",
+                    if self.replaygain_enabled { "Enabled (-18 LUFS)" } else { "Disabled" }
+                ));
+                self.apply_volume();
+            }
+            Message::ToggleGapless => {
+                self.gapless_enabled = !self.gapless_enabled;
+                self.status_message = Some(format!(
+                    "Gapless Playback {}",
+                    if self.gapless_enabled { "Enabled" } else { "Disabled" }
+                ));
+            }
+            Message::AnalyzeReplayGain(track_id) => {
+                let id = track_id.or(self.selected_track).or(self.current_playing_track_id);
+                if let Some(id) = id {
+                    if let Some(track) = self.all_tracks.iter().find(|t| t.id == id) {
+                        let path = track.path.clone();
+                        self.status_message = Some(format!("Analyzing loudness for {}...", track.title));
+                        let _ = self.replaygain_worker.enqueue(path);
+                    }
+                }
+            }
+            Message::PollReplayGain => {
+                while let Ok(event) = self.replaygain_worker.events().try_recv() {
+                    match event {
+                        ReplayGainEvent::Complete { path, result } => {
+                            let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Track");
+                            self.status_message = Some(format!("{}: {:.1} LUFS ({:+.1} dB)", name, result.integrated_lufs, result.gain_db));
+                            self.track_gains.insert(path, result);
+                            self.apply_volume();
+                        }
+                        ReplayGainEvent::Failed { path, error } => {
+                            eprintln!("ReplayGain failed for {}: {error}", path.display());
+                        }
+                    }
+                }
+            }
+            Message::StartEditTrack(track_id) => {
+                if let Some(track) = self.all_tracks.iter().find(|t| t.id == track_id) {
+                    self.editing_track = Some(EditingTrackState {
+                        track_id: track.id,
+                        title: track.title.clone(),
+                        artist: track.artist.clone(),
+                        album: track.album.clone(),
+                        genre: track.genre.clone(),
+                        year: track.year.map(|y| y.to_string()).unwrap_or_default(),
+                    });
+                }
+            }
+            Message::EditFieldChanged(field, value) => {
+                if let Some(editing) = &mut self.editing_track {
+                    match field {
+                        EditField::Title => editing.title = value,
+                        EditField::Artist => editing.artist = value,
+                        EditField::Album => editing.album = value,
+                        EditField::Genre => editing.genre = value,
+                        EditField::Year => editing.year = value,
+                    }
+                }
+            }
+            Message::SaveTrackTags => {
+                if let Some(editing) = self.editing_track.take() {
+                    let year_parsed = editing.year.trim().parse::<i32>().ok();
+                    let update = TagUpdate {
+                        title: Some(editing.title.trim().to_string()),
+                        artist: Some(editing.artist.trim().to_string()),
+                        album: Some(editing.album.trim().to_string()),
+                        genre: Some(editing.genre.trim().to_string()),
+                        year: year_parsed,
+                    };
+                    let db_path = library_database_path();
+                    if let Ok(mut db) = LibraryDatabase::open(db_path) {
+                        let _ = db.mass_tag(&[editing.track_id], &update);
+                        if let Ok(tracks) = db.query(&TrackQuery::default()) {
+                            self.all_tracks = tracks;
+                            self.refresh_visible_tracks();
+                            self.status_message = Some("Track tags updated successfully".to_string());
+                        }
+                    }
+                }
+            }
+            Message::CancelEditTrack => {
+                self.editing_track = None;
             }
             Message::GenerateSampleAudio => {
                 return Command::perform(create_and_index_demo_tracks(), Message::SampleAudioGenerated);
@@ -289,12 +413,20 @@ impl Application for KanonoApp {
             is_playing: self.is_playing,
             is_shuffled: self.is_shuffled,
             is_repeated: self.is_repeated,
+            replaygain_enabled: self.replaygain_enabled,
+            gapless_enabled: self.gapless_enabled,
             volume: self.volume,
             is_muted: self.is_muted,
             metadata: &self.playback.metadata,
             elapsed: self.playback.elapsed,
             status_message: self.status_message.as_deref(),
-            component_count: self.components.plugins().len(),
+            visualizer_pcm: &self.playback.visualizer_pcm,
+            current_track_gain: self
+                .current_playing_track_id
+                .and_then(|id| self.all_tracks.iter().find(|t| t.id == id))
+                .and_then(|t| self.track_gains.get(&t.path).copied()),
+            editing_track: self.editing_track.as_ref(),
+            components: self.components.plugins(),
         })
     }
 
@@ -302,6 +434,7 @@ impl Application for KanonoApp {
         Subscription::batch([
             time::every(Duration::from_millis(33)).map(|_| Message::PollPlayback),
             time::every(Duration::from_millis(100)).map(|_| Message::PollMpris),
+            time::every(Duration::from_millis(250)).map(|_| Message::PollReplayGain),
         ])
     }
 }
@@ -345,9 +478,23 @@ async fn index_music_folder(folder: PathBuf) -> IndexResult {
 }
 
 fn component_directory() -> PathBuf {
-    std::env::var_os("KANONO_COMPONENTS_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("components"))
+    if let Some(dir) = std::env::var_os("KANONO_COMPONENTS_DIR") {
+        return PathBuf::from(dir);
+    }
+    for candidate in ["components", "target/release", "target/debug"] {
+        let p = PathBuf::from(candidate);
+        if p.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&p) {
+                let has_so = entries.filter_map(|e| e.ok()).any(|e| {
+                    e.path().extension().map(|ext| ext == "so").unwrap_or(false)
+                });
+                if has_so {
+                    return p;
+                }
+            }
+        }
+    }
+    PathBuf::from("components")
 }
 
 fn library_database_path() -> PathBuf {
@@ -359,6 +506,94 @@ fn library_database_path() -> PathBuf {
 }
 
 impl KanonoApp {
+    fn apply_volume(&self) {
+        if let Some(output) = &self.audio_output {
+            if self.is_muted {
+                output.set_volume(0.0);
+                return;
+            }
+            let mut target_vol = self.volume;
+            if self.replaygain_enabled {
+                if let Some(track_id) = self.current_playing_track_id {
+                    if let Some(track) = self.all_tracks.iter().find(|t| t.id == track_id) {
+                        if let Some(result) = self.track_gains.get(&track.path) {
+                            let factor = 10.0_f32.powf((result.gain_db as f32) / 20.0).clamp(0.25, 2.5);
+                            target_vol = (self.volume * factor).clamp(0.0, 1.0);
+                        }
+                    }
+                }
+            }
+            output.set_volume(target_vol);
+        }
+    }
+
+    fn peek_next_track_id(&self) -> Option<i64> {
+        if self.is_repeated {
+            return self.current_playing_track_id;
+        }
+        if let Some(&first) = self.queued_track_ids.first() {
+            return Some(first);
+        }
+        let track_list = if !self.visible_tracks.is_empty() {
+            &self.visible_tracks
+        } else {
+            &self.all_tracks
+        };
+        if track_list.is_empty() {
+            return None;
+        }
+        if self.is_shuffled {
+            use std::time::SystemTime;
+            let seed = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos() as usize;
+            let random_idx = seed % track_list.len();
+            return Some(track_list[random_idx].id);
+        }
+        if let Some(current_id) = self.current_playing_track_id {
+            if let Some(curr_idx) = track_list.iter().position(|t| t.id == current_id) {
+                let next_idx = (curr_idx + 1) % track_list.len();
+                return Some(track_list[next_idx].id);
+            }
+        }
+        track_list.first().map(|t| t.id)
+    }
+
+    fn advance_to_preloaded(&mut self, next_id: i64) {
+        if !self.queued_track_ids.is_empty() && self.queued_track_ids[0] == next_id {
+            self.queued_track_ids.remove(0);
+        }
+        let Some((path, metadata)) = self.all_tracks.iter().find(|track| track.id == next_id).map(|track| {
+            (
+                track.path.clone(),
+                TrackMetadata {
+                    title: track.title.clone(),
+                    artist: track.artist.clone(),
+                    album: track.album.clone(),
+                    duration: track.duration,
+                },
+            )
+        }) else {
+            return;
+        };
+
+        self.playback.metadata = metadata;
+        self.playback.elapsed = Duration::ZERO;
+        self.selected_track = Some(next_id);
+        self.current_playing_track_id = Some(next_id);
+        self.mpris_state.set_metadata(self.playback.metadata.clone());
+        self.mpris_state.set_playing(true);
+        self.playback_sender.publish_track(self.playback.metadata.clone());
+        if let Some(output) = &self.audio_output {
+            output.reset_position();
+        }
+        self.apply_volume();
+        if !self.track_gains.contains_key(&path) {
+            let _ = self.replaygain_worker.enqueue(path);
+        }
+    }
+
     fn apply_playback_updates(&mut self) {
         for update in self.playback_receiver.drain() {
             match update {
@@ -371,11 +606,51 @@ impl KanonoApp {
         }
         self.mpris_state.set_metadata(self.playback.metadata.clone());
 
-        // Automatic track progression when song finishes
         if self.is_playing {
             if let Some(dur) = self.playback.metadata.duration {
-                if dur.as_secs() > 0 && self.playback.elapsed >= dur {
-                    self.play_next();
+                if dur.as_secs() > 0 {
+                    // Gapless preloading: append next track when 3.5s remain
+                    if self.gapless_enabled && self.preloaded_track_id.is_none() {
+                        let remaining = dur.saturating_sub(self.playback.elapsed);
+                        if remaining <= Duration::from_millis(3500) && remaining > Duration::from_millis(500) {
+                            if let Some(next_id) = self.peek_next_track_id() {
+                                if let Some(next_track) = self.all_tracks.iter().find(|t| t.id == next_id) {
+                                    self.preloaded_track_id = Some(next_id);
+                                    let next_path = next_track.path.clone();
+                                    if let Some(output) = &self.audio_output {
+                                        let queue = output.queue.clone();
+                                        let target_rate = output.config.sample_rate.0;
+                                        let target_channels = output.config.channels;
+                                        let gen = self.playback_generation.load(Ordering::Relaxed);
+                                        let pb_gen = Arc::clone(&self.playback_generation);
+                                        thread::spawn(move || {
+                                            if let Ok(track) = decode_track(&next_path) {
+                                                let resampled = resample_and_remap_channels(
+                                                    &track.samples,
+                                                    track.sample_rate,
+                                                    track.channels,
+                                                    target_rate,
+                                                    target_channels,
+                                                );
+                                                queue.push_interleaved_cancellable(resampled, || {
+                                                    pb_gen.load(Ordering::Relaxed) == gen
+                                                });
+                                            }
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Automatic track progression
+                    if self.playback.elapsed >= dur {
+                        if let Some(preloaded_id) = self.preloaded_track_id.take() {
+                            self.advance_to_preloaded(preloaded_id);
+                        } else {
+                            self.play_next();
+                        }
+                    }
                 }
             }
         }
@@ -424,6 +699,7 @@ impl KanonoApp {
     }
 
     fn play_track(&mut self, track_id: i64) {
+        self.preloaded_track_id = None;
         let Some((path, metadata)) = self.all_tracks.iter().find(|track| track.id == track_id).map(|track| {
             (
                 track.path.clone(),
@@ -449,9 +725,13 @@ impl KanonoApp {
 
         if self.audio_output.is_none() {
             if let Ok(output) = AudioOutput::open_default(self.playback_sender.clone()) {
-                output.set_volume(self.volume);
                 self.audio_output = Some(output);
             }
+        }
+
+        self.apply_volume();
+        if !self.track_gains.contains_key(&path) {
+            let _ = self.replaygain_worker.enqueue(path.clone());
         }
 
         if let Some(audio_output) = &self.audio_output {
@@ -495,6 +775,7 @@ impl KanonoApp {
     }
 
     fn seek_to(&mut self, fraction: f32) {
+        self.preloaded_track_id = None;
         let Some(duration) = self.playback.metadata.duration else { return };
         if duration.is_zero() { return; }
 
@@ -711,6 +992,33 @@ async fn create_and_index_demo_tracks() -> Result<Vec<LibraryTrack>, String> {
                 let bass_sq: f32 = if (t * (f / 2.0)).fract() < 0.5 { 0.2 } else { -0.2 };
                 (sq + bass_sq).clamp(-0.95, 0.95)
             })?;
+        }
+
+        // Track 4: Neon Skyline (WebM Vorbis)
+        let track4_path = music_dir.join("04 - Neon Skyline.webm");
+        if !track4_path.exists() {
+            let status = std::process::Command::new("ffmpeg")
+                .args([
+                    "-f", "lavfi",
+                    "-i", "sine=frequency=523.25:duration=12",
+                    "-c:a", "libvorbis",
+                    "-metadata", "title=Neon Skyline (WebM)",
+                    "-metadata", "artist=Kanono Synth",
+                    "-metadata", "album=Native Media",
+                    "-metadata", "genre=Cyberpunk",
+                    "-y",
+                    track4_path.to_str().unwrap(),
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+
+            if status.is_err() || !status.as_ref().map(|s| s.success()).unwrap_or(false) {
+                let wav_alt = music_dir.join("04 - Neon Skyline.wav");
+                let _ = write_synth_wav(&wav_alt, sample_rate, 12, |t| {
+                    ((2.0 * std::f32::consts::PI * 523.25 * t).sin() * 0.4).clamp(-0.95, 0.95)
+                });
+            }
         }
 
         let database_path = library_database_path();

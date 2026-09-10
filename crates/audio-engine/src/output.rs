@@ -180,6 +180,10 @@ impl AudioOutput {
                     if played_frames.saturating_sub(last_update) >= update_interval {
                         callback_last_position_update.store(played_frames, Ordering::Relaxed);
                         state_sender.publish_position(callback_clock.position(sample_rate));
+                        let win = output.len().min(512);
+                        if win > 0 {
+                            state_sender.publish_visualizer_pcm(Arc::from(&output[..win]));
+                        }
                     }
                 },
                 move |error| eprintln!("audio output error: {error}"),
@@ -205,6 +209,11 @@ impl AudioOutput {
                     if played_frames.saturating_sub(last_update) >= update_interval {
                         callback_last_position_update.store(played_frames, Ordering::Relaxed);
                         state_sender.publish_position(callback_clock.position(sample_rate));
+                        let win = output.len().min(512);
+                        if win > 0 {
+                            let pcm_f32: Vec<f32> = output[..win].iter().map(|&s| s as f32 / 32768.0).collect();
+                            state_sender.publish_visualizer_pcm(Arc::from(pcm_f32.as_slice()));
+                        }
                     }
                 },
                 move |error| eprintln!("audio output error: {error}"),
@@ -225,6 +234,11 @@ impl AudioOutput {
                     if played_frames.saturating_sub(last_update) >= update_interval {
                         callback_last_position_update.store(played_frames, Ordering::Relaxed);
                         state_sender.publish_position(callback_clock.position(sample_rate));
+                        let win = output.len().min(512);
+                        if win > 0 {
+                            let pcm_f32: Vec<f32> = output[..win].iter().map(|&s| (s as f32 / 32767.5) - 1.0).collect();
+                            state_sender.publish_visualizer_pcm(Arc::from(pcm_f32.as_slice()));
+                        }
                     }
                 },
                 move |error| eprintln!("audio output error: {error}"),
