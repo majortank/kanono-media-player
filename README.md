@@ -1,6 +1,14 @@
-# Kanono Media Player
+<div align="center">
+  <img src="assets/logo.svg" alt="Kanono Media Player Logo" width="128" />
+  <h1>Kanono Media Player</h1>
+  <p><strong>A modular Arch Linux audio player foundation inspired by Foobar2000</strong></p>
+</div>
 
-Kanono is a modular Arch Linux audio player foundation inspired by Foobar2000.
+<p align="center">
+  <img src="assets/demo/demo.png" alt="Kanono Media Player Demo" width="100%" />
+</p>
+
+Kanono is a modular, high-performance Arch Linux audio player inspired by Foobar2000, built with Rust and Iced. It features real-time audio visualization, low-latency gapless playback, comprehensive format support, dynamic plugin loading, and native desktop integration.
 
 ## Features & UI Controls
 

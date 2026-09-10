@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <rect width="256" height="256" rx="32" fill="#202a33"/>
+  <path fill="#4cb9a7" d="M27 172h202v28H27z"/>
+  <path fill="#91d7c7" d="M42 198h172v16H42z"/>
+  <path fill="#dbe9e4" d="M45 134h118v36H45z"/>
+  <path fill="#dbe9e4" d="M135 111h27l48 23v20h-75z"/>
+  <path fill="#dbe9e4" d="M87 104h34v34H87z"/>
+  <path fill="#4cb9a7" d="M96 112h16v18H96z"/>
+  <path fill="#4cb9a7" d="M143 119h13v12h-13z"/>
+  <path fill="#dbe9e4" d="M148 72h71v12h-71z"/>
+  <path fill="#dbe9e4" d="M148 78h14v47h-14z"/>
+  <circle cx="66" cy="186" r="20" fill="#10181d"/>
+  <circle cx="116" cy="186" r="20" fill="#10181d"/>
+  <circle cx="166" cy="186" r="20" fill="#10181d"/>
+  <circle cx="66" cy="186" r="8" fill="#91d7c7"/>
+  <circle cx="116" cy="186" r="8" fill="#91d7c7"/>
+  <circle cx="166" cy="186" r="8" fill="#91d7c7"/>
+  <path fill="#f7c948" d="M194 30v68.5a20 20 0 1 1-12-18.3V42l42-9v51.5a20 20 0 1 1-12-18.3V30z"/>
+  <path fill="#202a33" d="M206 42v9l18-4v-9z"/>
+</svg>
