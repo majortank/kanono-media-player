@@ -6,6 +6,26 @@ use crossbeam_queue::ArrayQueue;
 
 use crate::playback_state::{PlaybackClock, PlaybackStateSender};
 
+#[cfg(test)]
+mod tests {
+    use super::SampleQueue;
+
+    #[test]
+    fn converts_f32_ring_to_i16_without_clipping() {
+        let queue = SampleQueue::default();
+        let mut out = vec![0_i16; 4];
+        queue.push_interleaved([0.0, 1.0, -1.0, 0.5]);
+        for sample in out.iter_mut() {
+            let value = queue.fill_output_i16(sample);
+            *sample = value;
+        }
+        assert_eq!(out[0], 0);
+        assert_eq!(out[1], i16::MAX);
+        assert_eq!(out[2], i16::MIN);
+        assert!(out[3] > 0);
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub enum LatencyProfile {
     #[default]
@@ -65,6 +85,14 @@ impl SampleQueue {
             *sample = self.0.pop().unwrap_or(0.0);
         }
     }
+
+    #[inline]
+    pub fn fill_output_i16(&self, sample: &mut i16) -> i16 {
+        let value = self.0.pop().unwrap_or(0.0).clamp(-1.0, 1.0);
+        let pcm = (value * i16::MAX as f32).round() as i16;
+        *sample = pcm;
+        pcm
+    }
 }
 
 /// Keeps the CPAL stream alive. The callback does no decoding or allocation.
@@ -86,14 +114,16 @@ impl AudioOutput {
         let device = cpal::default_host()
             .default_output_device()
             .context("no default audio output device")?;
-        let supported = device
-            .supported_output_configs()
-            .context("failed to inspect output configurations")?
+        let configs: Vec<_> = device.supported_output_configs().context("failed to inspect output configurations")?.collect();
+        let preferred = configs
+            .iter()
             .find(|config| config.sample_format() == SampleFormat::F32)
-            .context("default output device has no f32 stream configuration")?;
-        let mut config = supported.with_max_sample_rate().config();
+            .or_else(|| configs.iter().find(|config| matches!(config.sample_format(), SampleFormat::I16 | SampleFormat::U16)))
+            .context("default output device has no usable stream configuration")?;
+        let sample_format = preferred.sample_format();
+        let mut config = preferred.with_max_sample_rate().config();
         if let LatencyProfile::FixedFrames(frames) = latency {
-            match supported.buffer_size() {
+            match preferred.buffer_size() {
                 SupportedBufferSize::Range { min, max } if frames >= *min && frames <= *max => {
                     config.buffer_size = BufferSize::Fixed(frames);
                 }
@@ -113,22 +143,63 @@ impl AudioOutput {
         let callback_last_position_update = Arc::clone(&last_position_update);
         let channels = usize::from(config.channels);
         let sample_rate = config.sample_rate.0;
-        let stream = device.build_output_stream(
-            &config,
-            move |output: &mut [f32], _| {
-                let frames = output.len() / channels;
-                callback_queue.fill_output(output);
-                let played_frames = callback_clock.advance(frames as u64);
-                let update_interval = u64::from(sample_rate / 30).max(1);
-                let last_update = callback_last_position_update.load(Ordering::Relaxed);
-                if played_frames.saturating_sub(last_update) >= update_interval {
-                    callback_last_position_update.store(played_frames, Ordering::Relaxed);
-                    state_sender.publish_position(callback_clock.position(sample_rate));
-                }
-            },
-            move |error| eprintln!("audio output error: {error}"),
-            None,
-        )?;
+        let stream = match sample_format {
+            SampleFormat::F32 => device.build_output_stream(
+                &config,
+                move |output: &mut [f32], _| {
+                    let frames = output.len() / channels;
+                    callback_queue.fill_output(output);
+                    let played_frames = callback_clock.advance(frames as u64);
+                    let update_interval = u64::from(sample_rate / 30).max(1);
+                    let last_update = callback_last_position_update.load(Ordering::Relaxed);
+                    if played_frames.saturating_sub(last_update) >= update_interval {
+                        callback_last_position_update.store(played_frames, Ordering::Relaxed);
+                        state_sender.publish_position(callback_clock.position(sample_rate));
+                    }
+                },
+                move |error| eprintln!("audio output error: {error}"),
+                None,
+            )?,
+            SampleFormat::I16 => device.build_output_stream(
+                &config,
+                move |output: &mut [i16], _| {
+                    let frames = output.len() / channels;
+                    for sample in output.iter_mut() {
+                        let value = callback_queue.0.pop().unwrap_or(0.0).clamp(-1.0, 1.0);
+                        *sample = (value * i16::MAX as f32).round() as i16;
+                    }
+                    let played_frames = callback_clock.advance(frames as u64);
+                    let update_interval = u64::from(sample_rate / 30).max(1);
+                    let last_update = callback_last_position_update.load(Ordering::Relaxed);
+                    if played_frames.saturating_sub(last_update) >= update_interval {
+                        callback_last_position_update.store(played_frames, Ordering::Relaxed);
+                        state_sender.publish_position(callback_clock.position(sample_rate));
+                    }
+                },
+                move |error| eprintln!("audio output error: {error}"),
+                None,
+            )?,
+            SampleFormat::U16 => device.build_output_stream(
+                &config,
+                move |output: &mut [u16], _| {
+                    let frames = output.len() / channels;
+                    for sample in output.iter_mut() {
+                        let value = callback_queue.0.pop().unwrap_or(0.0).clamp(-1.0, 1.0);
+                        *sample = ((value + 1.0) * u16::MAX as f32 / 2.0).round() as u16;
+                    }
+                    let played_frames = callback_clock.advance(frames as u64);
+                    let update_interval = u64::from(sample_rate / 30).max(1);
+                    let last_update = callback_last_position_update.load(Ordering::Relaxed);
+                    if played_frames.saturating_sub(last_update) >= update_interval {
+                        callback_last_position_update.store(played_frames, Ordering::Relaxed);
+                        state_sender.publish_position(callback_clock.position(sample_rate));
+                    }
+                },
+                move |error| eprintln!("audio output error: {error}"),
+                None,
+            )?,
+            sample_format => bail!("unsupported audio format: {sample_format:?}"),
+        };
         Ok(Self { _stream: stream, queue, config, clock })
     }
 
