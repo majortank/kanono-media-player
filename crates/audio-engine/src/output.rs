@@ -123,6 +123,7 @@ pub struct AudioOutput {
     pub config: StreamConfig,
     pub clock: PlaybackClock,
     pub volume: Arc<AtomicU32>,
+    pub last_position_update: Arc<AtomicU64>,
 }
 
 impl AudioOutput {
@@ -188,7 +189,7 @@ impl AudioOutput {
                         let played_frames = callback_clock.advance(actual_frames);
                         let update_interval = u64::from(sample_rate / 30).max(1);
                         let last_update = callback_last_position_update.load(Ordering::Relaxed);
-                        if played_frames.saturating_sub(last_update) >= update_interval {
+                        if last_update == 0 || played_frames < last_update || played_frames.saturating_sub(last_update) >= update_interval {
                             callback_last_position_update.store(played_frames, Ordering::Relaxed);
                             state_sender.publish_position(callback_clock.position(sample_rate));
                             let win = output.len().min(512);
@@ -225,7 +226,7 @@ impl AudioOutput {
                         let played_frames = callback_clock.advance(actual_frames);
                         let update_interval = u64::from(sample_rate / 30).max(1);
                         let last_update = callback_last_position_update.load(Ordering::Relaxed);
-                        if played_frames.saturating_sub(last_update) >= update_interval {
+                        if last_update == 0 || played_frames < last_update || played_frames.saturating_sub(last_update) >= update_interval {
                             callback_last_position_update.store(played_frames, Ordering::Relaxed);
                             state_sender.publish_position(callback_clock.position(sample_rate));
                             let win = output.len().min(512);
@@ -258,7 +259,7 @@ impl AudioOutput {
                         let played_frames = callback_clock.advance(actual_frames);
                         let update_interval = u64::from(sample_rate / 30).max(1);
                         let last_update = callback_last_position_update.load(Ordering::Relaxed);
-                        if played_frames.saturating_sub(last_update) >= update_interval {
+                        if last_update == 0 || played_frames < last_update || played_frames.saturating_sub(last_update) >= update_interval {
                             callback_last_position_update.store(played_frames, Ordering::Relaxed);
                             state_sender.publish_position(callback_clock.position(sample_rate));
                             let win = output.len().min(512);
@@ -275,7 +276,7 @@ impl AudioOutput {
             sample_format => bail!("unsupported audio format: {sample_format:?}"),
         };
         let _ = stream.pause();
-        Ok(Self { _stream: stream, queue, config, clock, volume })
+        Ok(Self { _stream: stream, queue, config, clock, volume, last_position_update })
     }
 
     /// Append a decoded track without clearing queued samples to preserve gapless order.
@@ -311,11 +312,13 @@ impl AudioOutput {
 
     pub fn reset_position(&self) {
         self.clock.reset();
+        self.last_position_update.store(0, Ordering::Relaxed);
     }
 
     pub fn set_position(&self, position: Duration) {
         let frames = (position.as_secs_f64() * f64::from(self.config.sample_rate.0)) as u64;
         self.clock.set_frames(frames);
+        self.last_position_update.store(frames, Ordering::Relaxed);
     }
 
     pub fn set_volume(&self, vol: f32) {
