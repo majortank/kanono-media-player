@@ -1,7 +1,15 @@
 use std::{fs::File, path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
-use symphonia::core::{audio::{AudioBufferRef, SampleBuffer}, codecs::CODEC_TYPE_NULL, errors::Error, formats::FormatOptions, io::MediaSourceStream, meta::{MetadataOptions, StandardTagKey}, probe::Hint};
+use symphonia::core::{
+    audio::{AudioBufferRef, SampleBuffer},
+    codecs::{CODEC_TYPE_NULL, CODEC_TYPE_OPUS},
+    errors::Error,
+    formats::FormatOptions,
+    io::MediaSourceStream,
+    meta::{MetadataOptions, StandardTagKey},
+    probe::Hint,
+};
 
 use crate::playback_state::{PlaybackStateSender, TrackMetadata, VISUALIZER_WINDOW_SAMPLES};
 
@@ -11,6 +19,54 @@ pub struct DecodedTrack {
     pub sample_rate: u32,
     pub channels: u16,
 }
+
+struct NativeOpusDecoder {
+    decoder: *mut libopus_sys::OpusDecoder,
+    channels: usize,
+}
+
+impl NativeOpusDecoder {
+    fn new(sample_rate: u32, channels: usize) -> Result<Self> {
+        let mut err = 0;
+        let decoder = unsafe {
+            libopus_sys::opus_decoder_create(sample_rate as i32, channels as i32, &mut err)
+        };
+        if err != libopus_sys::OPUS_OK as i32 || decoder.is_null() {
+            anyhow::bail!("failed to create libopus decoder: error code {err}");
+        }
+        Ok(Self { decoder, channels })
+    }
+
+    fn decode_float(&mut self, data: &[u8], pcm: &mut [f32]) -> Result<usize> {
+        let max_samples_per_channel = (pcm.len() / self.channels) as i32;
+        let res = unsafe {
+            libopus_sys::opus_decode_float(
+                self.decoder,
+                data.as_ptr(),
+                data.len() as i32,
+                pcm.as_mut_ptr(),
+                max_samples_per_channel,
+                0,
+            )
+        };
+        if res < 0 {
+            anyhow::bail!("opus_decode_float error code {res}");
+        }
+        Ok(res as usize)
+    }
+}
+
+impl Drop for NativeOpusDecoder {
+    fn drop(&mut self) {
+        if !self.decoder.is_null() {
+            unsafe {
+                libopus_sys::opus_decoder_destroy(self.decoder);
+            }
+        }
+    }
+}
+
+unsafe impl Send for NativeOpusDecoder {}
 
 /// Decodes MP3, FLAC, and WAV into interleaved 32-bit float samples.
 pub fn decode_file(path: impl AsRef<Path>) -> Result<Vec<f32>> {
@@ -101,39 +157,71 @@ pub fn decode_track(path: impl AsRef<Path>) -> Result<DecodedTrack> {
     if duration.is_some() {
         metadata.duration = duration;
     }
-    let mut decoder = symphonia::default::get_codecs().make(&track_codec_params, &Default::default())?;
+    let is_opus = track_codec_params.codec == CODEC_TYPE_OPUS;
     let mut samples = Vec::new();
 
-    loop {
-        let packet = match format.next_packet() {
-            Ok(packet) => packet,
-            Err(Error::IoError(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(error) => return Err(error.into()),
+    if is_opus {
+        let opus_rate = match sample_rate {
+            8000 | 12000 | 16000 | 24000 | 48000 => sample_rate,
+            _ => 48000,
         };
-        if packet.track_id() != track_id {
-            continue;
-        }
-        match decoder.decode(&packet) {
-            Ok(decoded) => {
-                if channels == 0 {
-                    channels = decoded.spec().channels.count() as u16;
-                }
-                if sample_rate == 0 {
-                    sample_rate = decoded.spec().rate;
-                }
-                append_f32(&mut samples, decoded);
+        let opus_channels = if channels == 1 { 1 } else { 2 };
+        let mut opus_decoder = NativeOpusDecoder::new(opus_rate, opus_channels)?;
+
+        sample_rate = opus_rate;
+        channels = opus_channels as u16;
+
+        let mut pcm_buf = vec![0.0f32; 5760 * opus_channels];
+
+        loop {
+            let packet = match format.next_packet() {
+                Ok(packet) => packet,
+                Err(Error::IoError(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(error) => return Err(error.into()),
+            };
+            if packet.track_id() != track_id {
+                continue;
             }
-            Err(Error::DecodeError(_)) => continue,
-            Err(error) => return Err(error.into()),
+            if let Ok(decoded_frames) = opus_decoder.decode_float(&packet.data, &mut pcm_buf) {
+                let count = decoded_frames * opus_channels;
+                samples.extend_from_slice(&pcm_buf[..count]);
+            }
+        }
+    } else {
+        let mut decoder = symphonia::default::get_codecs().make(&track_codec_params, &Default::default())?;
+
+        loop {
+            let packet = match format.next_packet() {
+                Ok(packet) => packet,
+                Err(Error::IoError(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(error) => return Err(error.into()),
+            };
+            if packet.track_id() != track_id {
+                continue;
+            }
+            match decoder.decode(&packet) {
+                Ok(decoded) => {
+                    if channels == 0 {
+                        channels = decoded.spec().channels.count() as u16;
+                    }
+                    if sample_rate == 0 {
+                        sample_rate = decoded.spec().rate;
+                    }
+                    append_f32(&mut samples, decoded);
+                }
+                Err(Error::DecodeError(_)) => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+
+        if channels == 0 {
+            channels = decoder.codec_params().channels.map(|c| c.count() as u16).unwrap_or(2);
+        }
+        if sample_rate == 0 {
+            sample_rate = decoder.codec_params().sample_rate.unwrap_or(44100);
         }
     }
 
-    if channels == 0 {
-        channels = decoder.codec_params().channels.map(|c| c.count() as u16).unwrap_or(2);
-    }
-    if sample_rate == 0 {
-        sample_rate = decoder.codec_params().sample_rate.unwrap_or(44100);
-    }
     if metadata.duration.is_none() && sample_rate > 0 && channels > 0 && !samples.is_empty() {
         let total_frames = samples.len() / usize::from(channels);
         metadata.duration = Some(Duration::from_secs_f64(total_frames as f64 / f64::from(sample_rate)));
@@ -288,6 +376,47 @@ mod tests {
                 assert!(!decoded.samples.is_empty());
                 assert!(decoded.metadata.duration.is_some());
                 let _ = std::fs::remove_file(&temp_webm);
+            }
+        }
+    }
+
+    #[test]
+    fn test_decode_webm_opus() {
+        let temp_webm = std::env::temp_dir().join("kanono_test_track_opus.webm");
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-f", "lavfi",
+                "-i", "sine=frequency=440:duration=1",
+                "-c:a", "libopus",
+                "-y",
+                temp_webm.to_str().unwrap(),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+
+        if let Ok(s) = status {
+            if s.success() {
+                let decoded = decode_track(&temp_webm).expect("Opus WebM file should decode successfully");
+                assert_eq!(decoded.sample_rate, 48000);
+                assert!(decoded.channels > 0);
+                assert!(!decoded.samples.is_empty());
+                assert!(decoded.metadata.duration.is_some());
+                let _ = std::fs::remove_file(&temp_webm);
+            }
+        }
+
+        // Test user's actual files if present on disk
+        let user_dir = std::path::Path::new("/home/tankisocorp/Music/Sebata masene");
+        if user_dir.exists() {
+            if let Some(entry) = std::fs::read_dir(user_dir).unwrap().flatten().find(|e| e.path().extension().is_some_and(|ext| ext == "webm")) {
+                let path = entry.path();
+                let decoded = decode_track(&path).unwrap_or_else(|e| panic!("Failed to decode {}: {e}", path.display()));
+                assert_eq!(decoded.sample_rate, 48000);
+                assert_eq!(decoded.channels, 2);
+                assert!(!decoded.samples.is_empty());
+                let rg = crate::replaygain::analyze_and_tag(&path).unwrap_or_else(|e| panic!("ReplayGain failed on {}: {e}", path.display()));
+                assert!(rg.integrated_lufs.is_finite());
             }
         }
     }

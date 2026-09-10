@@ -66,11 +66,11 @@ pub fn calculate_replaygain(samples: &[f32], channels: u16, sample_rate: u32) ->
     if channels == 0 || samples.is_empty() || samples.len() % usize::from(channels) != 0 {
         bail!("PCM must contain complete interleaved frames");
     }
-    let mut analyzer = EbuR128::new(u32::from(channels), sample_rate, Mode::I | Mode::TRUE_PEAK)?;
+    let mut analyzer = EbuR128::new(u32::from(channels), sample_rate, Mode::I | Mode::SAMPLE_PEAK)?;
     analyzer.add_frames_f32(samples)?;
     let integrated_lufs = analyzer.loudness_global()?;
     let true_peak = (0..channels)
-        .map(|channel| analyzer.true_peak(u32::from(channel)))
+        .map(|channel| analyzer.sample_peak(u32::from(channel)))
         .collect::<std::result::Result<Vec<_>, _>>()?
         .into_iter()
         .fold(0.0_f64, f64::max);

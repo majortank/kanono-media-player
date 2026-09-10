@@ -23,6 +23,7 @@ const ICON_LIBRARY_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" vie
 const ICON_QUEUE_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#94a3b8"><path d="M15 6H3v2h12V6zm0 4H3v2h12v-2zM3 16h8v-2H3v2zM17 6v8.18c-.31-.11-.65-.18-1-.18-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3V8h3V6h-5z"/></svg>"##;
 const ICON_INFO_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#94a3b8"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/></svg>"##;
 const ICON_EDIT_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#94a3b8"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>"##;
+const ICON_FILE_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#94a3b8"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>"##;
 
 fn svg_icon<'a, M: 'a>(data: &'static [u8], size: f32) -> Element<'a, M> {
     svg(svg::Handle::from_memory(data))
@@ -76,6 +77,18 @@ pub fn player_view<'a>(props: ViewProps<'a>) -> Element<'a, Message> {
         .width(Length::Fill);
 
     let top_actions = row![
+        button(
+            row![
+                svg_icon(ICON_FILE_SVG, 15.0),
+                text("Add Files").size(13),
+            ]
+            .spacing(6)
+            .align_items(Alignment::Center),
+        )
+        .on_press(Message::ImportFiles)
+        .padding([8, 14])
+        .style(btn_default_style()),
+
         button(
             row![
                 svg_icon(ICON_FOLDER_SVG, 15.0),
@@ -249,15 +262,16 @@ fn render_track_list<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
                 row![
                     button(
                         row![
-                            svg_icon(ICON_PLAY_SVG, 14.0),
-                            text("Generate Sample Audio Tracks").size(14).style(Color::WHITE),
+                            svg_icon(ICON_FILE_SVG, 14.0),
+                            text("Add Audio Files").size(14).style(Color::WHITE),
                         ]
                         .spacing(8)
                         .align_items(Alignment::Center),
                     )
-                    .on_press(Message::GenerateSampleAudio)
+                    .on_press(Message::ImportFiles)
                     .padding([10, 18])
                     .style(btn_primary_style()),
+
                     button(
                         row![
                             svg_icon(ICON_FOLDER_SVG, 15.0),
@@ -267,6 +281,18 @@ fn render_track_list<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
                         .align_items(Alignment::Center),
                     )
                     .on_press(Message::ImportFolder)
+                    .padding([10, 18])
+                    .style(btn_default_style()),
+
+                    button(
+                        row![
+                            svg_icon(ICON_PLAY_SVG, 14.0),
+                            text("Sample Audio").size(14),
+                        ]
+                        .spacing(8)
+                        .align_items(Alignment::Center),
+                    )
+                    .on_press(Message::GenerateSampleAudio)
                     .padding([10, 18])
                     .style(btn_default_style()),
                 ]

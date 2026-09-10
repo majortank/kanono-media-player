@@ -79,35 +79,53 @@ impl LibraryDatabase {
 
     /// Recursively indexes supported audio files, skipping rows unchanged since the last scan.
     pub fn scan_directory(&mut self, root: impl AsRef<Path>) -> Result<usize> {
-        let root = root.as_ref();
+        self.scan_paths(&[root.as_ref().to_path_buf()])
+    }
+
+    /// Indexes a list of files or directories.
+    pub fn scan_paths(&mut self, paths: &[PathBuf]) -> Result<usize> {
         let transaction = self.connection.transaction()?;
         let mut indexed = 0;
-        for entry in WalkDir::new(root).follow_links(false) {
-            let entry = match entry { Ok(entry) => entry, Err(_) => continue };
-            let path = entry.path();
-            if !entry.file_type().is_file() || !is_supported(path) { continue; }
-            let modified_at = modification_seconds(path)?;
-            let existing: Option<i64> = transaction.query_row(
-                "SELECT modified_at FROM tracks WHERE path = ?1",
-                [path.to_string_lossy().as_ref()],
-                |row| row.get(0),
-            ).optional()?;
-            if existing == Some(modified_at) { continue; }
-            let track = read_track(path)?;
-            transaction.execute(
-                "INSERT INTO tracks (path, title, artist, album, genre, year, track_number, duration_ms, modified_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-                 ON CONFLICT(path) DO UPDATE SET title = excluded.title, artist = excluded.artist,
-                 album = excluded.album, genre = excluded.genre, year = excluded.year,
-                 track_number = excluded.track_number, duration_ms = excluded.duration_ms,
-                 modified_at = excluded.modified_at",
-                params![
-                    track.path.to_string_lossy(), track.title, track.artist, track.album, track.genre,
-                    track.year, track.track_number, track.duration.map(|value| value.as_millis() as i64), modified_at,
-                ],
-            )?;
-            indexed += 1;
+
+        for input_path in paths {
+            let mut process_file = |p: &Path| -> Result<()> {
+                if !is_supported(p) { return Ok(()); }
+                let modified_at = modification_seconds(p)?;
+                let existing: Option<i64> = transaction.query_row(
+                    "SELECT modified_at FROM tracks WHERE path = ?1",
+                    [p.to_string_lossy().as_ref()],
+                    |row| row.get(0),
+                ).optional()?;
+                if existing == Some(modified_at) { return Ok(()); }
+                let track = read_track(p)?;
+                transaction.execute(
+                    "INSERT INTO tracks (path, title, artist, album, genre, year, track_number, duration_ms, modified_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                     ON CONFLICT(path) DO UPDATE SET title = excluded.title, artist = excluded.artist,
+                     album = excluded.album, genre = excluded.genre, year = excluded.year,
+                     track_number = excluded.track_number, duration_ms = excluded.duration_ms,
+                     modified_at = excluded.modified_at",
+                    params![
+                        track.path.to_string_lossy(), track.title, track.artist, track.album, track.genre,
+                        track.year, track.track_number, track.duration.map(|value| value.as_millis() as i64), modified_at,
+                    ],
+                )?;
+                indexed += 1;
+                Ok(())
+            };
+
+            if input_path.is_file() {
+                let _ = process_file(input_path);
+            } else if input_path.is_dir() {
+                for entry in WalkDir::new(input_path).follow_links(false) {
+                    let entry = match entry { Ok(entry) => entry, Err(_) => continue };
+                    if entry.file_type().is_file() {
+                        let _ = process_file(entry.path());
+                    }
+                }
+            }
         }
+
         transaction.commit()?;
         Ok(indexed)
     }
@@ -165,7 +183,7 @@ impl LibraryDatabase {
     }
 }
 
-fn read_track(path: &Path) -> Result<LibraryTrack> {
+pub(crate) fn read_track(path: &Path) -> Result<LibraryTrack> {
     let default_title = path.file_stem().and_then(|value| value.to_str()).unwrap_or("Unknown title").to_owned();
     let mut track = LibraryTrack {
         id: 0,

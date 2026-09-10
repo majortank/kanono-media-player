@@ -11,6 +11,7 @@ crossbeam-channel.workspace = true
 crossbeam-queue.workspace = true
 ebur128.workspace = true
 id3.workspace = true
+libopus_sys.workspace = true
 rusqlite.workspace = true
 symphonia.workspace = true
 walkdir.workspace = true

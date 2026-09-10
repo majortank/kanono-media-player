@@ -107,6 +107,8 @@ pub enum Message {
     PollReplayGain,
     ImportFolder,
     FolderPicked(Option<PathBuf>),
+    ImportFiles,
+    FilesPicked(Option<Vec<PathBuf>>),
     LibraryIndexed(IndexResult),
     SearchChanged(String),
     SelectFolder(Option<PathBuf>),
@@ -216,6 +218,14 @@ impl Application for KanonoApp {
             Message::FolderPicked(folder) => {
                 if let Some(folder) = folder {
                     return Command::perform(index_music_folder(folder), Message::LibraryIndexed);
+                }
+            }
+            Message::ImportFiles => return Command::perform(pick_music_files(), Message::FilesPicked),
+            Message::FilesPicked(files) => {
+                if let Some(files) = files {
+                    if !files.is_empty() {
+                        return Command::perform(index_music_files(files), Message::LibraryIndexed);
+                    }
                 }
             }
             Message::LibraryIndexed(result) => self.apply_index_result(result),
@@ -446,12 +456,62 @@ pub struct IndexResult {
     error: Option<String>,
 }
 
+async fn pick_music_files() -> Option<Vec<PathBuf>> {
+    rfd::AsyncFileDialog::new()
+        .set_title("Add Audio Files (WebM, MP3, FLAC, WAV, OGG...)")
+        .add_filter(
+            "Supported Audio (*.webm, *.mkv, *.mp3, *.flac, *.wav, *.ogg, *.m4a...)",
+            &[
+                "webm", "mkv", "mp3", "mp2", "mp1", "flac", "wav", "wave", "ogg", "oga", "m4a",
+                "m4b", "mp4", "aac", "alac", "aiff", "aif", "caf",
+            ],
+        )
+        .add_filter("WebM / Matroska Audio (*.webm, *.mkv)", &["webm", "mkv"])
+        .add_filter("MP3 Audio (*.mp3)", &["mp3"])
+        .add_filter("FLAC Lossless Audio (*.flac)", &["flac"])
+        .add_filter("Waveform Audio (*.wav, *.wave)", &["wav", "wave"])
+        .add_filter("Ogg Vorbis / Opus (*.ogg, *.oga)", &["ogg", "oga"])
+        .add_filter("AAC / MP4 Audio (*.m4a, *.mp4, *.aac)", &["m4a", "mp4", "aac"])
+        .add_filter("All Files (*.*)", &["*"])
+        .pick_files()
+        .await
+        .map(|handles| handles.into_iter().map(|h| h.path().to_owned()).collect())
+}
+
 async fn pick_music_folder() -> Option<PathBuf> {
     rfd::AsyncFileDialog::new()
-        .set_title("Add Music Folder")
+        .set_title("Add Music Folder (Scans WebM, MP3, FLAC, WAV, OGG...)")
         .pick_folder()
         .await
         .map(|handle| handle.path().to_owned())
+}
+
+async fn index_music_files(files: Vec<PathBuf>) -> IndexResult {
+    let folder = files
+        .first()
+        .and_then(|p| p.parent())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let database_path = library_database_path();
+    let result = tokio::task::spawn_blocking({
+        let files = files.clone();
+        move || -> Result<Vec<LibraryTrack>, String> {
+            let mut library = LibraryDatabase::open(database_path).map_err(|e| e.to_string())?;
+            library.scan_paths(&files).map_err(|e| e.to_string())?;
+            library.query(&TrackQuery::default()).map_err(|e| e.to_string())
+        }
+    })
+    .await;
+
+    match result {
+        Ok(Ok(tracks)) => IndexResult { folder, tracks, error: None },
+        Ok(Err(error)) => IndexResult { folder, tracks: Vec::new(), error: Some(error) },
+        Err(error) => IndexResult {
+            folder,
+            tracks: Vec::new(),
+            error: Some(format!("music indexing worker failed: {error}")),
+        },
+    }
 }
 
 async fn index_music_folder(folder: PathBuf) -> IndexResult {
