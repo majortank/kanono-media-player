@@ -1,4 +1,4 @@
-use std::{sync::{atomic::{AtomicU64, Ordering}, Arc}, thread, time::Duration};
+use std::{sync::{atomic::{AtomicU32, AtomicU64, Ordering}, Arc}, thread, time::Duration};
 
 use anyhow::{bail, Context, Result};
 use cpal::{traits::{DeviceTrait, HostTrait, StreamTrait}, BufferSize, SampleFormat, Stream, StreamConfig, SupportedBufferSize};
@@ -89,7 +89,11 @@ impl SampleQueue {
     #[inline]
     pub fn fill_output_i16(&self, sample: &mut i16) -> i16 {
         let value = self.0.pop().unwrap_or(0.0).clamp(-1.0, 1.0);
-        let pcm = (value * i16::MAX as f32).round() as i16;
+        let pcm = if value < 0.0 {
+            (value * 32768.0).round().clamp(-32768.0, 32767.0) as i16
+        } else {
+            (value * 32767.0).round().clamp(-32768.0, 32767.0) as i16
+        };
         *sample = pcm;
         pcm
     }
@@ -101,6 +105,7 @@ pub struct AudioOutput {
     pub queue: SampleQueue,
     pub config: StreamConfig,
     pub clock: PlaybackClock,
+    pub volume: Arc<AtomicU32>,
 }
 
 impl AudioOutput {
@@ -139,6 +144,8 @@ impl AudioOutput {
         let callback_queue = queue.clone();
         let clock = PlaybackClock::default();
         let callback_clock = clock.clone();
+        let volume = Arc::new(AtomicU32::new(1.0_f32.to_bits()));
+        let callback_volume = Arc::clone(&volume);
         let last_position_update = Arc::new(AtomicU64::new(0));
         let callback_last_position_update = Arc::clone(&last_position_update);
         let channels = usize::from(config.channels);
@@ -149,6 +156,12 @@ impl AudioOutput {
                 move |output: &mut [f32], _| {
                     let frames = output.len() / channels;
                     callback_queue.fill_output(output);
+                    let vol = f32::from_bits(callback_volume.load(Ordering::Relaxed));
+                    if (vol - 1.0).abs() > 0.001 {
+                        for sample in output.iter_mut() {
+                            *sample *= vol;
+                        }
+                    }
                     let played_frames = callback_clock.advance(frames as u64);
                     let update_interval = u64::from(sample_rate / 30).max(1);
                     let last_update = callback_last_position_update.load(Ordering::Relaxed);
@@ -164,9 +177,15 @@ impl AudioOutput {
                 &config,
                 move |output: &mut [i16], _| {
                     let frames = output.len() / channels;
+                    let vol = f32::from_bits(callback_volume.load(Ordering::Relaxed));
                     for sample in output.iter_mut() {
-                        let value = callback_queue.0.pop().unwrap_or(0.0).clamp(-1.0, 1.0);
-                        *sample = (value * i16::MAX as f32).round() as i16;
+                        let value = (callback_queue.0.pop().unwrap_or(0.0).clamp(-1.0, 1.0) * vol).clamp(-1.0, 1.0);
+                        let pcm = if value < 0.0 {
+                            (value * 32768.0).round().clamp(-32768.0, 32767.0) as i16
+                        } else {
+                            (value * 32767.0).round().clamp(-32768.0, 32767.0) as i16
+                        };
+                        *sample = pcm;
                     }
                     let played_frames = callback_clock.advance(frames as u64);
                     let update_interval = u64::from(sample_rate / 30).max(1);
@@ -183,8 +202,9 @@ impl AudioOutput {
                 &config,
                 move |output: &mut [u16], _| {
                     let frames = output.len() / channels;
+                    let vol = f32::from_bits(callback_volume.load(Ordering::Relaxed));
                     for sample in output.iter_mut() {
-                        let value = callback_queue.0.pop().unwrap_or(0.0).clamp(-1.0, 1.0);
+                        let value = callback_queue.0.pop().unwrap_or(0.0).clamp(-1.0, 1.0) * vol;
                         *sample = ((value + 1.0) * u16::MAX as f32 / 2.0).round() as u16;
                     }
                     let played_frames = callback_clock.advance(frames as u64);
@@ -200,7 +220,7 @@ impl AudioOutput {
             )?,
             sample_format => bail!("unsupported audio format: {sample_format:?}"),
         };
-        Ok(Self { _stream: stream, queue, config, clock })
+        Ok(Self { _stream: stream, queue, config, clock, volume })
     }
 
     /// Append a decoded track without clearing queued samples to preserve gapless order.
@@ -228,5 +248,18 @@ impl AudioOutput {
 
     pub fn reset_position(&self) {
         self.clock.reset();
+    }
+
+    pub fn set_position(&self, position: Duration) {
+        let frames = (position.as_secs_f64() * f64::from(self.config.sample_rate.0)) as u64;
+        self.clock.set_frames(frames);
+    }
+
+    pub fn set_volume(&self, vol: f32) {
+        self.volume.store(vol.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn volume(&self) -> f32 {
+        f32::from_bits(self.volume.load(Ordering::Relaxed))
     }
 }

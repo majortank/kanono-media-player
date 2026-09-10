@@ -78,4 +78,8 @@ impl PlaybackClock {
     pub fn reset(&self) {
         self.0.store(0, Ordering::Relaxed);
     }
+
+    pub fn set_frames(&self, frames: u64) {
+        self.0.store(frames, Ordering::Relaxed);
+    }
 }

@@ -46,6 +46,17 @@ Build the application with `cargo run -p kanono-player`. Build the example share
 object with `cargo build -p kanono-example-component --release`; it is emitted under
 `target/release/` as `libkanono_example_component.so`.
 
+## Features & UI Controls
+
+- **Sleek Modern UI**: Foobar2000-inspired dark theme built with Iced 0.12, with responsive track tables, active playback indicators, and clear navigation tabs (Library, Play Queue, Folders, and Audio & System Info).
+- **Interactive Scrubber**: Seek to any position in real-time with sample-accurate PCM repositioning and dynamic elapsed/total time labels.
+- **Volume & Mute**: Real-time atomic software volume control (0%–100%) with instant mute toggle.
+- **Playback Controls**: Play/Pause, Next Track, Previous Track (instant rewind if >3s into track), Shuffle mode, and Repeat mode.
+- **Play Queue**: Add tracks to queue with `+Q` button, view and reorder queue, jump to any queued track, and clear queue.
+- **Real-Time Library Search**: Filter library songs instantaneously across titles, artists, and albums.
+- **Built-in Demo Audio Generator**: Click "Sample Audio" to generate 3 high-quality synthetic stereo WAV tracks ("Kanono Groove", "Ambient Reverie", "Cyberpunk Chiptune") automatically indexed into SQLite for instant testing without external audio files.
+
+
 ## Plugin contract
 
 Plugins export `kanono_plugin_api_version`, `kanono_create_plugin`, and

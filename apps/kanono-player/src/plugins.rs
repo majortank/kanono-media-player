@@ -84,6 +84,7 @@ impl PluginRegistry {
         &self.plugins
     }
 
+    #[allow(dead_code)]
     pub fn failures(&self) -> &[String] {
         &self.failures
     }
