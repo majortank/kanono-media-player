@@ -2,6 +2,108 @@
 
 Kanono is a modular Arch Linux audio player foundation inspired by Foobar2000.
 
+## Features & UI Controls
+
+- **Sleek Modern UI**: Foobar2000-inspired dark theme built with Iced 0.12, with responsive track tables, active playback indicators, and clear navigation tabs (Library, Play Queue, Folders, and Audio & System Info).
+- **Interactive Scrubber**: Seek to any position in real-time with sample-accurate PCM repositioning and dynamic elapsed/total time labels.
+- **Volume & Mute**: Real-time atomic software volume control (0%–100%) with instant mute toggle.
+- **Playback Controls**: Play/Pause, Next Track, Previous Track (instant rewind if >3s into track), Shuffle mode, and Repeat mode.
+- **Play Queue**: Add tracks to queue with `+Q` button, view and reorder queue, jump to any queued track, and clear queue.
+- **Real-Time Library Search**: Filter library songs instantaneously across titles, artists, and albums.
+- **Built-in Demo Audio Generator**: Click "Sample Audio" to generate 3 high-quality synthetic stereo WAV tracks ("Kanono Groove", "Ambient Reverie", "Cyberpunk Chiptune") automatically indexed into SQLite for instant testing without external audio files.
+
+## Installation & Getting Started
+
+### Prerequisites & Dependencies
+
+Kanono is built with Rust and uses ALSA, D-Bus (MPRIS), and X11/Wayland (via WGPU/Iced).
+
+1. Install Rust (1.75+ or stable) via [rustup](https://rustup.rs/):
+   ```bash
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   ```
+
+2. Install system audio and windowing libraries for your Linux distribution:
+
+   - **Arch Linux:**
+     ```bash
+     sudo pacman -S alsa-lib dbus libxkbcommon vulkan-icd-loader
+     ```
+   - **Ubuntu / Debian:**
+     ```bash
+     sudo apt update && sudo apt install -y \
+       build-essential \
+       pkg-config \
+       libasound2-dev \
+       libdbus-1-dev \
+       libxkbcommon-dev \
+       libxkbcommon-x11-dev
+     ```
+   - **Fedora:**
+     ```bash
+     sudo dnf install \
+       alsa-lib-devel \
+       dbus-devel \
+       libxkbcommon-devel \
+       libxkbcommon-x11-devel \
+       vulkan-loader-devel
+     ```
+
+### Build & Run
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/majortank/kanono-media-player.git
+   cd kanono-media-player
+   ```
+
+2. **Run in development mode:**
+   ```bash
+   cargo run -p kanono-player
+   ```
+
+3. **Run in optimized release mode:**
+   ```bash
+   cargo run --release -p kanono-player
+   ```
+
+4. **Run with low-latency PipeWire / JACK:**
+   ```bash
+   PIPEWIRE_LATENCY=128/48000 cargo run --release -p kanono-player
+   ```
+
+5. **Install system-wide or user binary (optional):**
+   ```bash
+   cargo install --path apps/kanono-player
+   ```
+   Or install the built release binary to `/usr/local/bin`:
+   ```bash
+   cargo build --release -p kanono-player
+   sudo install -Dm755 target/release/kanono-player /usr/local/bin/kanono-player
+   ```
+
+### Running Tests
+
+Run the full test suite across the workspace:
+```bash
+cargo test --workspace
+```
+
+### Dynamic Plugin Components
+
+Kanono supports loading dynamic shared object (`.so`) plugins:
+
+1. Build the example plugin:
+   ```bash
+   cargo build -p kanono-example-component --release
+   ```
+2. Create the components folder and copy the plugin:
+   ```bash
+   mkdir -p components
+   cp target/release/libkanono_example_component.so components/
+   ```
+3. Launch Kanono; it automatically detects and loads all plugins in `./components` (or `$KANONO_COMPONENTS_DIR`).
+
 ## Workspace layout
 
 ```text
@@ -41,20 +143,6 @@ For JACK, select the desired server period/buffer before starting the app.
 the iced thread. CPAL publishes position with `try_send`; decoded PCM is copied into
 fixed-size `Arc<[f32]>` visualizer windows off the real-time thread. The UI polls at
 30 Hz and drains stale updates, so rendering never blocks audio output.
-
-Build the application with `cargo run -p kanono-player`. Build the example shared
-object with `cargo build -p kanono-example-component --release`; it is emitted under
-`target/release/` as `libkanono_example_component.so`.
-
-## Features & UI Controls
-
-- **Sleek Modern UI**: Foobar2000-inspired dark theme built with Iced 0.12, with responsive track tables, active playback indicators, and clear navigation tabs (Library, Play Queue, Folders, and Audio & System Info).
-- **Interactive Scrubber**: Seek to any position in real-time with sample-accurate PCM repositioning and dynamic elapsed/total time labels.
-- **Volume & Mute**: Real-time atomic software volume control (0%–100%) with instant mute toggle.
-- **Playback Controls**: Play/Pause, Next Track, Previous Track (instant rewind if >3s into track), Shuffle mode, and Repeat mode.
-- **Play Queue**: Add tracks to queue with `+Q` button, view and reorder queue, jump to any queued track, and clear queue.
-- **Real-Time Library Search**: Filter library songs instantaneously across titles, artists, and albums.
-- **Built-in Demo Audio Generator**: Click "Sample Audio" to generate 3 high-quality synthetic stereo WAV tracks ("Kanono Groove", "Ambient Reverie", "Cyberpunk Chiptune") automatically indexed into SQLite for instant testing without external audio files.
 
 
 ## Plugin contract
