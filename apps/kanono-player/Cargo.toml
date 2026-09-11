@@ -11,6 +11,8 @@ crossbeam-channel.workspace = true
 libloading.workspace = true
 rfd.workspace = true
 tokio.workspace = true
-zbus.workspace = true
 kanono-audio-engine = { path = "../../crates/audio-engine" }
 kanono-plugin-api = { path = "../../crates/plugin-api" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus.workspace = true

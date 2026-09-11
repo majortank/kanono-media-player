@@ -1,14 +1,24 @@
 <div align="center">
   <img src="assets/logo.svg" alt="Kanono Media Player Logo" width="128" />
   <h1>Kanono Media Player</h1>
-  <p><strong>A modular Arch Linux audio player foundation inspired by Foobar2000</strong></p>
+   <p><strong>A modular desktop audio player inspired by Foobar2000</strong></p>
 </div>
 
 <p align="center">
   <img src="assets/demo/demo.png" alt="Kanono Media Player Demo" width="100%" />
 </p>
 
-Kanono is a modular, high-performance Arch Linux audio player inspired by Foobar2000, built with Rust and Iced. It features real-time audio visualization, low-latency gapless playback, comprehensive format support, dynamic plugin loading, and native desktop integration.
+Kanono is a modular, high-performance desktop audio player inspired by Foobar2000, built with Rust and Iced. It features real-time audio visualization, low-latency gapless playback, comprehensive format support, dynamic plugin loading, and native desktop integration.
+
+## Release Packages
+
+Tagged releases produce these native installation artifacts through GitHub Actions:
+
+- Linux: `kanono-media-player-linux-x64.tar.gz`, containing the executable, desktop entry, and icon under a standard `/usr` layout.
+- Windows: `kanono-media-player-windows-x64-setup.exe`, an Inno Setup installer with Start Menu and optional desktop shortcuts.
+- macOS: `kanono-media-player-macos-arm64.dmg` for Apple Silicon and `kanono-media-player-macos-x64.dmg` for Intel Macs.
+
+The Windows installer and macOS disk images are unsigned by default. Before distributing public builds, configure Authenticode signing and Apple Developer ID signing plus notarization in the release workflow.
 
 ## Features & UI Controls
 

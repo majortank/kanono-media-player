@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev libdbus-1-dev libxkbcommon-dev libxkbcommon-x11-dev
+      - name: Build release binary
+        run: cargo build --locked --release -p kanono-player
+      - name: Create Linux archive
+        run: |
+          mkdir -p dist/kanono-media-player-linux-x64/usr/bin dist/kanono-media-player-linux-x64/usr/share/applications dist/kanono-media-player-linux-x64/usr/share/icons/hicolor/scalable/apps
+          install -m755 target/release/kanono-player dist/kanono-media-player-linux-x64/usr/bin/kanono-player
+          install -m644 resources/kanono-media-player.desktop dist/kanono-media-player-linux-x64/usr/share/applications/kanono-media-player.desktop
+          install -m644 assets/icons/hicolor/scalable/apps/kanono-media-player.svg dist/kanono-media-player-linux-x64/usr/share/icons/hicolor/scalable/apps/kanono-media-player.svg
+          tar -C dist -czf dist/kanono-media-player-linux-x64.tar.gz kanono-media-player-linux-x64
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/kanono-media-player-linux-x64.tar.gz
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Build release binary
+        run: cargo build --locked --release -p kanono-player --target x86_64-pc-windows-msvc
+      - uses: Minionguyjpro/Inno-Setup-Action@v1.2.5
+        with:
+          path: packaging/windows/kanono-media-player.iss
+          options: /DAppVersion=${{ github.ref_name }}
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/kanono-media-player-windows-x64-setup.exe
+
+  macos:
+    strategy:
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            architecture: arm64
+          - runner: macos-13
+            target: x86_64-apple-darwin
+            architecture: x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build release binary
+        run: cargo build --locked --release -p kanono-player --target ${{ matrix.target }}
+      - name: Create application bundle and disk image
+        run: |
+          mkdir -p "dist/Kanono Media Player.app/Contents/MacOS"
+          install -m755 target/${{ matrix.target }}/release/kanono-player "dist/Kanono Media Player.app/Contents/MacOS/kanono-player"
+          install -m644 packaging/macos/Info.plist "dist/Kanono Media Player.app/Contents/Info.plist"
+          hdiutil create -volname "Kanono Media Player" -srcfolder "dist/Kanono Media Player.app" -ov -format UDZO dist/kanono-media-player-macos-${{ matrix.architecture }}.dmg
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/kanono-media-player-macos-${{ matrix.architecture }}.dmg

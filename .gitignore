@@ -14,3 +14,9 @@
 
 # Compiled dynamic libraries
 *.so
+
+# Release artifacts
+/dist/
+*.dmg
+*.msi
+*.exe
