@@ -1,4 +1,8 @@
-use std::{collections::BTreeSet, path::PathBuf, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use iced::{
     widget::{button, column, container, horizontal_space, row, scrollable, slider, svg, text, text_input},
@@ -6,7 +10,10 @@ use iced::{
 };
 use kanono_audio_engine::{LibraryTrack, ReplayGainResult, TrackMetadata};
 
-use crate::{plugins::RegisteredPlugin, EditField, EditingTrackState, Message, NavTab};
+use crate::{
+    plugins::RegisteredPlugin, BatchEditState, BatchField, BpmFilter, DurationFilter,
+    EditField, EditingTrackState, FilterCategory, FilterState, Message, NavTab,
+};
 
 const LOGO_SVG: &[u8] = include_bytes!("../../../assets/icons/hicolor/scalable/apps/kanono-media-player.svg");
 const ICON_PLAY_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#ffffff"><polygon points="6,4 20,12 6,20"/></svg>"##;
@@ -24,6 +31,11 @@ const ICON_QUEUE_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewB
 const ICON_INFO_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#94a3b8"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/></svg>"##;
 const ICON_EDIT_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#94a3b8"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>"##;
 const ICON_FILE_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#94a3b8"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>"##;
+const ICON_FIRE_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#f59e0b"><path d="M12 23c-4.97 0-9-4.03-9-9 0-3.3 1.8-6.19 4.47-7.75.52-.3 1.15.08 1.15.68v.57c0 1.25.77 2.37 1.94 2.8 1.48.55 2.44 1.98 2.44 3.56 0 .55.45 1 1 1s1-.45 1-1c0-2.31-1.35-4.32-3.32-5.26-.64-.31-.83-1.12-.39-1.66C12.3 5.48 14.28 4.2 16.5 4.03c.59-.05 1.05.47.95 1.05-.33 1.95.42 3.93 1.97 5.17C20.47 11.1 21 12.5 21 14c0 4.97-4.03 9-9 9z"/></svg>"##;
+const ICON_CHEVRON_RIGHT_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#94a3b8"><polygon points="8,5 16,12 8,19"/></svg>"##;
+const ICON_CHEVRON_DOWN_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#94a3b8"><polygon points="5,8 12,16 19,8"/></svg>"##;
+const ICON_CHECK_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#10b981"><polygon points="9,16.2 4.8,12 3.4,13.4 9,19 21,7 19.6,5.6"/></svg>"##;
+const ICON_FILTER_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#94a3b8"><path d="M10 18h4v-2h-4v2zM3 6v2h18V6H3zm3 7h12v-2H6v2z"/></svg>"##;
 
 fn svg_icon<'a, M: 'a>(data: &'static [u8], size: f32) -> Element<'a, M> {
     svg(svg::Handle::from_memory(data))
@@ -36,9 +48,13 @@ pub struct ViewProps<'a> {
     pub tracks: &'a [LibraryTrack],
     pub all_tracks: &'a [LibraryTrack],
     pub selected_folder: Option<&'a PathBuf>,
+    pub expanded_folders: &'a HashSet<PathBuf>,
     pub current_tab: NavTab,
+    pub filter_state: &'a FilterState,
     pub search: &'a str,
     pub selected_track: Option<i64>,
+    pub selected_track_ids: &'a HashSet<i64>,
+    pub batch_edit: &'a BatchEditState,
     pub current_playing_track_id: Option<i64>,
     pub queued_track_ids: &'a [i64],
     pub is_playing: bool,
@@ -137,7 +153,7 @@ pub fn player_view<'a>(props: ViewProps<'a>) -> Element<'a, Message> {
 
     // --- MAIN CONTENT ---
     let main_content = match props.current_tab {
-        NavTab::Library | NavTab::Folders => render_track_list(&props),
+        NavTab::Library | NavTab::Folders | NavTab::MostPlayed => render_track_list(&props),
         NavTab::Queue => render_queue_list(&props),
         NavTab::Info => render_info_view(&props),
     };
@@ -162,9 +178,9 @@ pub fn player_view<'a>(props: ViewProps<'a>) -> Element<'a, Message> {
 }
 
 fn render_sidebar<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
-    let folders = folder_roots(props.all_tracks);
-
-    let is_lib_active = props.current_tab == NavTab::Library && props.selected_folder.is_none();
+    let is_lib_active = props.current_tab == NavTab::Library
+        && props.selected_folder.is_none()
+        && !props.filter_state.is_any_active();
     let lib_btn = button(
         row![
             svg_icon(ICON_LIBRARY_SVG, 16.0),
@@ -178,6 +194,22 @@ fn render_sidebar<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
     .width(Length::Fill)
     .padding([8, 12])
     .style(if is_lib_active { btn_selected_nav_style() } else { btn_nav_style() });
+
+    let most_played_count = props.all_tracks.iter().filter(|t| t.play_count > 0).count();
+    let is_most_played_active = props.current_tab == NavTab::MostPlayed;
+    let most_played_btn = button(
+        row![
+            svg_icon(ICON_FIRE_SVG, 16.0),
+            text("Most Played").size(14).width(Length::Fill),
+            text(format!("{}", most_played_count)).size(11).style(Color::from_rgb8(245, 158, 11)),
+        ]
+        .spacing(8)
+        .align_items(Alignment::Center),
+    )
+    .on_press(Message::SelectTab(NavTab::MostPlayed))
+    .width(Length::Fill)
+    .padding([8, 12])
+    .style(if is_most_played_active { btn_selected_nav_style() } else { btn_nav_style() });
 
     let is_queue_active = props.current_tab == NavTab::Queue;
     let queue_btn = button(
@@ -208,47 +240,346 @@ fn render_sidebar<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
     .padding([8, 12])
     .style(if is_info_active { btn_selected_nav_style() } else { btn_nav_style() });
 
-    let mut folder_buttons = column![].spacing(4);
-    for folder in folders {
-        let label = folder
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("Folder")
-            .to_owned();
-        let is_selected = props.selected_folder.map(|f| f == &folder).unwrap_or(false);
+    // Category Selector
+    let cat_btn = |cat: FilterCategory, label: &'static str| -> Element<'a, Message> {
+        let is_active = props.filter_state.active_category == cat;
+        button(text(label).size(11))
+            .on_press(Message::SelectFilterCategory(cat))
+            .padding([4, 8])
+            .style(btn_chip_style(is_active))
+            .into()
+    };
 
-        folder_buttons = folder_buttons.push(
-            button(
+    let cat_chips_1 = row![
+        cat_btn(FilterCategory::All, "All"),
+        cat_btn(FilterCategory::Artists, "Artists"),
+        cat_btn(FilterCategory::Albums, "Albums"),
+        cat_btn(FilterCategory::Genres, "Genres"),
+    ]
+    .spacing(4);
+
+    let cat_chips_2 = row![
+        cat_btn(FilterCategory::Folders, "Folders"),
+        cat_btn(FilterCategory::Duration, "Duration"),
+        cat_btn(FilterCategory::Year, "Year"),
+        cat_btn(FilterCategory::Bpm, "BPM"),
+    ]
+    .spacing(4);
+
+    // Filter details / active options
+    let filter_details: Element<'a, Message> = match props.filter_state.active_category {
+        FilterCategory::Artists => {
+            let mut artists_map: HashMap<String, usize> = HashMap::new();
+            for t in props.all_tracks {
+                if !t.artist.is_empty() {
+                    *artists_map.entry(t.artist.clone()).or_insert(0) += 1;
+                }
+            }
+            let mut artists: Vec<_> = artists_map.into_iter().collect();
+            artists.sort_by_key(|a| a.0.to_lowercase());
+
+            let mut artist_list = column![].spacing(3);
+            for (artist, count) in artists {
+                let is_sel = props.filter_state.artist.as_ref().map(|a| a == &artist).unwrap_or(false);
+                let btn = button(
+                    row![
+                        text(&artist).size(12).width(Length::Fill),
+                        text(format!("{}", count)).size(10).style(Color::from_rgb8(148, 163, 184)),
+                    ]
+                    .spacing(4)
+                    .align_items(Alignment::Center),
+                )
+                .on_press(Message::SetArtistFilter(if is_sel { None } else { Some(artist) }))
+                .padding([4, 8])
+                .width(Length::Fill)
+                .style(if is_sel { btn_selected_nav_style() } else { btn_invisible_style() });
+                artist_list = artist_list.push(btn);
+            }
+            artist_list.into()
+        }
+        FilterCategory::Albums => {
+            let mut albums_map: HashMap<String, usize> = HashMap::new();
+            for t in props.all_tracks {
+                if !t.album.is_empty() {
+                    *albums_map.entry(t.album.clone()).or_insert(0) += 1;
+                }
+            }
+            let mut albums: Vec<_> = albums_map.into_iter().collect();
+            albums.sort_by_key(|a| a.0.to_lowercase());
+
+            let mut album_list = column![].spacing(3);
+            for (album, count) in albums {
+                let is_sel = props.filter_state.album.as_ref().map(|a| a == &album).unwrap_or(false);
+                let btn = button(
+                    row![
+                        text(&album).size(12).width(Length::Fill),
+                        text(format!("{}", count)).size(10).style(Color::from_rgb8(148, 163, 184)),
+                    ]
+                    .spacing(4)
+                    .align_items(Alignment::Center),
+                )
+                .on_press(Message::SetAlbumFilter(if is_sel { None } else { Some(album) }))
+                .padding([4, 8])
+                .width(Length::Fill)
+                .style(if is_sel { btn_selected_nav_style() } else { btn_invisible_style() });
+                album_list = album_list.push(btn);
+            }
+            album_list.into()
+        }
+        FilterCategory::Genres => {
+            let mut genres_map: HashMap<String, usize> = HashMap::new();
+            for t in props.all_tracks {
+                if !t.genre.is_empty() {
+                    *genres_map.entry(t.genre.clone()).or_insert(0) += 1;
+                }
+            }
+            let mut genres: Vec<_> = genres_map.into_iter().collect();
+            genres.sort_by_key(|a| a.0.to_lowercase());
+
+            let mut genre_list = column![].spacing(3);
+            for (genre, count) in genres {
+                let is_sel = props.filter_state.genre.as_ref().map(|g| g == &genre).unwrap_or(false);
+                let btn = button(
+                    row![
+                        text(&genre).size(12).width(Length::Fill),
+                        text(format!("{}", count)).size(10).style(Color::from_rgb8(148, 163, 184)),
+                    ]
+                    .spacing(4)
+                    .align_items(Alignment::Center),
+                )
+                .on_press(Message::SetGenreFilter(if is_sel { None } else { Some(genre) }))
+                .padding([4, 8])
+                .width(Length::Fill)
+                .style(if is_sel { btn_selected_nav_style() } else { btn_invisible_style() });
+                genre_list = genre_list.push(btn);
+            }
+            genre_list.into()
+        }
+        FilterCategory::Duration => {
+            let dur_btn = |df: DurationFilter, label: &'static str| -> Element<'a, Message> {
+                let is_sel = props.filter_state.duration == Some(df);
+                button(text(label).size(12))
+                    .on_press(Message::SetDurationFilter(if is_sel { None } else { Some(df) }))
+                    .padding([5, 10])
+                    .width(Length::Fill)
+                    .style(if is_sel { btn_selected_nav_style() } else { btn_default_style() })
+                    .into()
+            };
+            column![
+                dur_btn(DurationFilter::Short, "< 2 minutes"),
+                dur_btn(DurationFilter::Medium, "2 - 4 minutes"),
+                dur_btn(DurationFilter::Long, "4 - 6 minutes"),
+                dur_btn(DurationFilter::ExtraLong, "> 6 minutes"),
+            ]
+            .spacing(4)
+            .into()
+        }
+        FilterCategory::Year => {
+            let mut years_map: HashMap<i32, usize> = HashMap::new();
+            for t in props.all_tracks {
+                if let Some(y) = t.year {
+                    *years_map.entry(y).or_insert(0) += 1;
+                }
+            }
+            let mut years: Vec<_> = years_map.into_iter().collect();
+            years.sort_by_key(|a| std::cmp::Reverse(a.0));
+
+            if years.is_empty() {
+                column![text("No year metadata found").size(12).style(Color::from_rgb8(148, 163, 184))].into()
+            } else {
+                let mut year_list = column![].spacing(3);
+                for (year, count) in years {
+                    let is_sel = props.filter_state.year == Some(year);
+                    let btn = button(
+                        row![
+                            text(format!("{}", year)).size(12).width(Length::Fill),
+                            text(format!("{}", count)).size(10).style(Color::from_rgb8(148, 163, 184)),
+                        ]
+                        .spacing(4)
+                        .align_items(Alignment::Center),
+                    )
+                    .on_press(Message::SetYearFilter(if is_sel { None } else { Some(year) }))
+                    .padding([4, 8])
+                    .width(Length::Fill)
+                    .style(if is_sel { btn_selected_nav_style() } else { btn_invisible_style() });
+                    year_list = year_list.push(btn);
+                }
+                year_list.into()
+            }
+        }
+        FilterCategory::Bpm => {
+            let bpm_btn = |bf: BpmFilter, label: &'static str| -> Element<'a, Message> {
+                let is_sel = props.filter_state.bpm == Some(bf);
+                button(text(label).size(12))
+                    .on_press(Message::SetBpmFilter(if is_sel { None } else { Some(bf) }))
+                    .padding([5, 10])
+                    .width(Length::Fill)
+                    .style(if is_sel { btn_selected_nav_style() } else { btn_default_style() })
+                    .into()
+            };
+            column![
+                bpm_btn(BpmFilter::Slow, "< 90 BPM (Chill)"),
+                bpm_btn(BpmFilter::Medium, "90 - 120 BPM (Mid-Tempo)"),
+                bpm_btn(BpmFilter::Fast, "120 - 140 BPM (Upbeat)"),
+                bpm_btn(BpmFilter::HighEnergy, "> 140 BPM (High Energy)"),
+            ]
+            .spacing(4)
+            .into()
+        }
+        FilterCategory::All | FilterCategory::Folders => {
+            let tree = build_folder_tree(props.all_tracks);
+            if tree.is_empty() {
+                column![text("No folders loaded").size(12).style(Color::from_rgb8(148, 163, 184))].into()
+            } else {
+                let mut folder_col = column![].spacing(2);
+                for node in &tree {
+                    folder_col = folder_col.push(render_folder_tree_node(node, 0, props));
+                }
+                folder_col.into()
+            }
+        }
+    };
+
+    // Active filter chip / clear pill
+    let mut filter_summary_row: Option<Element<'a, Message>> = None;
+    if props.filter_state.is_any_active() {
+        let mut desc = String::new();
+        if let Some(artist) = &props.filter_state.artist {
+            desc.push_str(&format!("Artist: {} ", artist));
+        }
+        if let Some(album) = &props.filter_state.album {
+            desc.push_str(&format!("Album: {} ", album));
+        }
+        if let Some(genre) = &props.filter_state.genre {
+            desc.push_str(&format!("Genre: {} ", genre));
+        }
+        if let Some(dur) = props.filter_state.duration {
+            desc.push_str(&format!("Duration: {} ", dur.label()));
+        }
+        if let Some(year) = props.filter_state.year {
+            desc.push_str(&format!("Year: {} ", year));
+        }
+        if let Some(bpm) = props.filter_state.bpm {
+            desc.push_str(&format!("BPM: {} ", bpm.label()));
+        }
+
+        filter_summary_row = Some(
+            container(
                 row![
-                    svg_icon(ICON_FOLDER_SVG, 14.0),
-                    text(label).size(13).width(Length::Fill),
+                    svg_icon(ICON_FILTER_SVG, 12.0),
+                    text(desc.trim()).size(11).style(Color::WHITE).width(Length::Fill),
+                    button(text("✕").size(11))
+                        .on_press(Message::ClearFilters)
+                        .padding([2, 5])
+                        .style(btn_invisible_style()),
                 ]
-                .spacing(6)
+                .spacing(4)
                 .align_items(Alignment::Center),
             )
-            .on_press(Message::SelectFolder(Some(folder)))
-            .width(Length::Fill)
-            .padding([6, 10])
-            .style(if is_selected { btn_selected_nav_style() } else { btn_nav_style() }),
+            .padding([4, 8])
+            .style(badge_container_style())
+            .into(),
         );
     }
 
-    let sidebar_content = column![
+    let mut sidebar_content = column![
         text("NAVIGATION").size(11).style(Color::from_rgb8(100, 116, 139)),
         lib_btn,
+        most_played_btn,
         queue_btn,
         info_btn,
-        text("FOLDERS").size(11).style(Color::from_rgb8(100, 116, 139)),
-        folder_buttons,
+        text("FILTER BY").size(11).style(Color::from_rgb8(100, 116, 139)),
+        cat_chips_1,
+        cat_chips_2,
     ]
-    .spacing(10);
+    .spacing(8);
+
+    if let Some(summary) = filter_summary_row {
+        sidebar_content = sidebar_content.push(summary);
+    }
+
+    sidebar_content = sidebar_content.push(filter_details);
+
+    // If active category is not Folders or All, also show hierarchical Folders section at bottom
+    if props.filter_state.active_category != FilterCategory::Folders && props.filter_state.active_category != FilterCategory::All {
+        let tree = build_folder_tree(props.all_tracks);
+        if !tree.is_empty() {
+            let mut folder_col = column![
+                text("FOLDERS").size(11).style(Color::from_rgb8(100, 116, 139)),
+            ]
+            .spacing(4);
+            for node in &tree {
+                folder_col = folder_col.push(render_folder_tree_node(node, 0, props));
+            }
+            sidebar_content = sidebar_content.push(folder_col);
+        }
+    }
 
     container(scrollable(sidebar_content).height(Length::Fill))
-        .padding(14)
-        .width(Length::Fixed(220.0))
+        .padding(12)
+        .width(Length::Fixed(240.0))
         .height(Length::Fill)
         .style(panel_container_style())
         .into()
+}
+
+fn render_folder_tree_node<'a>(
+    node: &FolderTreeNode,
+    depth: usize,
+    props: &ViewProps<'a>,
+) -> Element<'a, Message> {
+    let is_selected = props.selected_folder.map(|f| f == &node.path).unwrap_or(false);
+    let has_children = !node.children.is_empty();
+    let is_expanded = props.expanded_folders.contains(&node.path);
+
+    let toggle_btn: Element<'a, Message> = if has_children {
+        let icon = if is_expanded { ICON_CHEVRON_DOWN_SVG } else { ICON_CHEVRON_RIGHT_SVG };
+        button(svg_icon(icon, 10.0))
+            .on_press(Message::ToggleFolderExpanded(node.path.clone()))
+            .padding([4, 4])
+            .style(btn_invisible_style())
+            .into()
+    } else {
+        container(horizontal_space().width(Length::Fixed(14.0))).into()
+    };
+
+    let folder_label = button(
+        row![
+            svg_icon(ICON_FOLDER_SVG, 13.0),
+            text(node.name.clone()).size(12).width(Length::Fill),
+            text(format!("{}", node.track_count)).size(10).style(Color::from_rgb8(148, 163, 184)),
+        ]
+        .spacing(4)
+        .align_items(Alignment::Center),
+    )
+    .on_press(Message::SelectFolder(Some(node.path.clone())))
+    .padding([4, 6])
+    .width(Length::Fill)
+    .style(if is_selected { btn_selected_nav_style() } else { btn_invisible_style() });
+
+    let play_btn = button(svg_icon(ICON_PLAY_SVG, 9.0))
+        .on_press(Message::PlayFolder(node.path.clone()))
+        .padding([3, 5])
+        .style(btn_play_row_style());
+
+    let queue_btn = button(text("+Q").size(10))
+        .on_press(Message::QueueFolder(node.path.clone()))
+        .padding([2, 4])
+        .style(btn_queue_row_style());
+
+    let mut row_items = row![].spacing(2).align_items(Alignment::Center);
+    if depth > 0 {
+        row_items = row_items.push(horizontal_space().width(Length::Fixed((depth * 10) as f32)));
+    }
+    row_items = row_items.push(toggle_btn).push(folder_label).push(play_btn).push(queue_btn);
+
+    let mut col = column![row_items].spacing(2);
+    if has_children && is_expanded {
+        for child in &node.children {
+            col = col.push(render_folder_tree_node(child, depth + 1, props));
+        }
+    }
+    col.into()
 }
 
 fn render_track_list<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
@@ -309,28 +640,161 @@ fn render_track_list<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
         .into();
     }
 
-    let header_title = if let Some(folder) = props.selected_folder {
-        folder
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("Music Folder")
-            .to_string()
+    // Determine view header
+    let is_most_played = props.current_tab == NavTab::MostPlayed;
+    let (header_title, header_icon): (String, Element<'a, Message>) = if is_most_played {
+        ("Frequently Played Tracks".to_string(), svg_icon(ICON_FIRE_SVG, 22.0))
+    } else if let Some(folder) = props.selected_folder {
+        let name = folder.file_name().and_then(|n| n.to_str()).unwrap_or("Folder").to_string();
+        (format!("Folder: {}", name), svg_icon(ICON_FOLDER_SVG, 18.0))
+    } else if props.filter_state.is_any_active() {
+        let mut filter_desc = String::new();
+        if let Some(artist) = &props.filter_state.artist { filter_desc = format!("Artist: {artist}"); }
+        else if let Some(album) = &props.filter_state.album { filter_desc = format!("Album: {album}"); }
+        else if let Some(genre) = &props.filter_state.genre { filter_desc = format!("Genre: {genre}"); }
+        else if let Some(dur) = props.filter_state.duration { filter_desc = format!("Duration: {}", dur.label()); }
+        else if let Some(yr) = props.filter_state.year { filter_desc = format!("Year: {yr}"); }
+        else if let Some(bpm) = props.filter_state.bpm { filter_desc = format!("BPM: {}", bpm.label()); }
+        (format!("Filter: {}", filter_desc), svg_icon(ICON_FILTER_SVG, 16.0))
+    } else if !props.search.is_empty() {
+        (format!("Search: \"{}\"", props.search), svg_icon(ICON_LIBRARY_SVG, 18.0))
     } else {
-        "All Tracks".to_string()
+        ("All Tracks".to_string(), svg_icon(ICON_LIBRARY_SVG, 18.0))
     };
 
-    let title_row = row![
+    let mut left_title_row = row![
+        header_icon,
         text(header_title).size(20).style(Color::WHITE),
-        horizontal_space(),
+    ]
+    .spacing(8)
+    .align_items(Alignment::Center);
+
+    if is_most_played {
+        left_title_row = left_title_row
+            .push(
+                button(
+                    row![svg_icon(ICON_PLAY_SVG, 11.0), text("Play All").size(12).style(Color::WHITE)]
+                        .spacing(4)
+                        .align_items(Alignment::Center),
+                )
+                .on_press(Message::PlayMostPlayed)
+                .padding([5, 10])
+                .style(btn_primary_style()),
+            )
+            .push(
+                button(text("+Q Queue All").size(12))
+                    .on_press(Message::QueueMostPlayed)
+                    .padding([5, 10])
+                    .style(btn_default_style()),
+            );
+    }
+
+    let is_filtered_or_searched = props.selected_folder.is_some()
+        || props.filter_state.is_any_active()
+        || !props.search.is_empty()
+        || !props.selected_track_ids.is_empty()
+        || is_most_played;
+
+    let mut right_title_row = row![
         text(format!("{} songs found", props.tracks.len()))
             .size(13)
             .style(Color::from_rgb8(148, 163, 184)),
     ]
+    .spacing(12)
     .align_items(Alignment::Center);
 
+    if is_filtered_or_searched {
+        right_title_row = right_title_row.push(
+            button(
+                row![
+                    text("✕ Clear").size(12),
+                ]
+                .spacing(4)
+                .align_items(Alignment::Center),
+            )
+            .on_press(Message::ClearAll)
+            .padding([5, 10])
+            .style(btn_default_style()),
+        );
+    }
+
+    let title_row = row![
+        left_title_row,
+        horizontal_space(),
+        right_title_row,
+    ]
+    .align_items(Alignment::Center);
+
+    // Multi-Selection Action Bar
+    let selection_bar: Option<Element<'a, Message>> = if !props.selected_track_ids.is_empty() {
+        Some(
+            container(
+                row![
+                    svg_icon(ICON_CHECK_SVG, 14.0),
+                    text(format!("{} songs selected", props.selected_track_ids.len()))
+                        .size(13)
+                        .style(Color::WHITE),
+                    horizontal_space(),
+                    button(
+                        row![svg_icon(ICON_PLAY_SVG, 11.0), text("Play Selected").size(12).style(Color::WHITE)]
+                            .spacing(4)
+                            .align_items(Alignment::Center),
+                    )
+                    .on_press(Message::PlaySelectedTracks)
+                    .padding([5, 10])
+                    .style(btn_primary_style()),
+
+                    button(text("+Q Add to Queue").size(12))
+                        .on_press(Message::QueueSelectedTracks)
+                        .padding([5, 10])
+                        .style(btn_default_style()),
+
+                    button(
+                        row![svg_icon(ICON_EDIT_SVG, 12.0), text("Batch Edit Tags").size(12)]
+                            .spacing(4)
+                            .align_items(Alignment::Center),
+                    )
+                    .on_press(Message::StartBatchEdit)
+                    .padding([5, 10])
+                    .style(btn_accent_style()),
+
+                    button(text("✕ Deselect").size(12))
+                        .on_press(Message::ClearTrackSelection)
+                        .padding([5, 8])
+                        .style(btn_default_style()),
+                ]
+                .spacing(8)
+                .align_items(Alignment::Center),
+            )
+            .padding([6, 12])
+            .style(selection_bar_style())
+            .into(),
+        )
+    } else {
+        None
+    };
+
     // Column Headers
+    let all_selected = !props.tracks.is_empty() && props.tracks.iter().all(|t| props.selected_track_ids.contains(&t.id));
+    let select_all_btn = button(
+        container(if all_selected {
+            svg_icon(ICON_CHECK_SVG, 11.0)
+        } else {
+            horizontal_space().into()
+        })
+        .width(Length::Fixed(16.0))
+        .height(Length::Fixed(16.0))
+        .style(if all_selected { checkbox_checked_style() } else { checkbox_unchecked_style() })
+        .align_x(iced::alignment::Horizontal::Center)
+        .align_y(iced::alignment::Vertical::Center),
+    )
+    .on_press(Message::SelectAllVisibleTracks)
+    .padding(2)
+    .style(btn_invisible_style());
+
     let col_headers = row![
-        text("#").width(Length::Fixed(36.0)).style(Color::from_rgb8(100, 116, 139)),
+        select_all_btn,
+        text("#").width(Length::Fixed(28.0)).style(Color::from_rgb8(100, 116, 139)),
         text("TITLE").width(Length::FillPortion(4)).style(Color::from_rgb8(100, 116, 139)),
         text("ARTIST").width(Length::FillPortion(3)).style(Color::from_rgb8(100, 116, 139)),
         text("ALBUM").width(Length::FillPortion(3)).style(Color::from_rgb8(100, 116, 139)),
@@ -343,73 +807,139 @@ fn render_track_list<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
     let mut track_rows = column![].spacing(3);
     for (idx, track) in props.tracks.iter().enumerate() {
         let is_playing = props.current_playing_track_id == Some(track.id);
-        let is_selected = props.selected_track == Some(track.id);
+        let is_row_selected = props.selected_track == Some(track.id);
+        let is_checked = props.selected_track_ids.contains(&track.id);
         let duration = track.duration.map(format_duration).unwrap_or_else(|| "--:--".into());
+
+        let row_check_btn = button(
+            container(if is_checked {
+                svg_icon(ICON_CHECK_SVG, 11.0)
+            } else {
+                horizontal_space().into()
+            })
+            .width(Length::Fixed(16.0))
+            .height(Length::Fixed(16.0))
+            .style(if is_checked { checkbox_checked_style() } else { checkbox_unchecked_style() })
+            .align_x(iced::alignment::Horizontal::Center)
+            .align_y(iced::alignment::Vertical::Center),
+        )
+        .on_press(Message::ToggleTrackSelection(track.id))
+        .padding(2)
+        .style(btn_invisible_style());
 
         let icon: Element<'a, Message> = if is_playing {
             container(svg_icon(ICON_PLAY_SVG, 12.0))
-                .width(Length::Fixed(28.0))
+                .width(Length::Fixed(24.0))
                 .into()
         } else {
             container(text(format!("{:02}", idx + 1)).size(13).style(Color::from_rgb8(100, 116, 139)))
-                .width(Length::Fixed(28.0))
+                .width(Length::Fixed(24.0))
                 .into()
         };
 
         let title_style = if is_playing {
             Color::from_rgb8(52, 211, 153)
-        } else if is_selected {
+        } else if is_row_selected || is_checked {
             Color::from_rgb8(96, 165, 250)
         } else {
             Color::WHITE
         };
 
-        let row_btn = button(
+        let mut title_inner = row![
+            text(&track.title).size(14).style(title_style),
+        ]
+        .spacing(6)
+        .align_items(Alignment::Center);
+
+        if track.play_count > 0 || is_most_played {
+            title_inner = title_inner.push(
+                container(
+                    row![
+                        svg_icon(ICON_FIRE_SVG, 11.0),
+                        text(format!("{} plays", track.play_count)).size(10).style(Color::from_rgb8(245, 158, 11)),
+                    ]
+                    .spacing(3)
+                    .align_items(Alignment::Center),
+                )
+                .padding([2, 5])
+                .style(badge_container_style()),
+            );
+        }
+
+        let row_content = row![
+            row_check_btn,
+            icon,
+            container(title_inner).width(Length::FillPortion(4)),
+            text(&track.artist).width(Length::FillPortion(3)).size(13).style(Color::from_rgb8(148, 163, 184)),
+            text(&track.album).width(Length::FillPortion(3)).size(13).style(Color::from_rgb8(148, 163, 184)),
+            text(duration).width(Length::Fixed(56.0)).size(13).style(Color::from_rgb8(148, 163, 184)),
             row![
-                icon,
-                text(&track.title).width(Length::FillPortion(4)).size(14).style(title_style),
-                text(&track.artist).width(Length::FillPortion(3)).size(13).style(Color::from_rgb8(148, 163, 184)),
-                text(&track.album).width(Length::FillPortion(3)).size(13).style(Color::from_rgb8(148, 163, 184)),
-                text(duration).width(Length::Fixed(56.0)).size(13).style(Color::from_rgb8(148, 163, 184)),
-                row![
-                    button(svg_icon(ICON_PLAY_SVG, 10.0))
-                        .on_press(Message::PlayTrack(track.id))
-                        .padding([5, 8])
-                        .style(btn_play_row_style()),
-                    button(text("+Q").size(11))
-                        .on_press(Message::QueueTrack(track.id))
-                        .padding([4, 6])
-                        .style(btn_queue_row_style()),
-                    button(svg_icon(ICON_EDIT_SVG, 11.0))
-                        .on_press(Message::StartEditTrack(track.id))
-                        .padding([4, 6])
-                        .style(btn_default_style()),
-                ]
-                .spacing(4)
-                .width(Length::Fixed(116.0)),
+                button(svg_icon(ICON_PLAY_SVG, 10.0))
+                    .on_press(Message::PlayTrack(track.id))
+                    .padding([5, 8])
+                    .style(btn_play_row_style()),
+                button(text("+Q").size(11))
+                    .on_press(Message::QueueTrack(track.id))
+                    .padding([4, 6])
+                    .style(btn_queue_row_style()),
+                button(svg_icon(ICON_EDIT_SVG, 11.0))
+                    .on_press(Message::StartEditTrack(track.id))
+                    .padding([4, 6])
+                    .style(btn_default_style()),
             ]
-            .spacing(8)
-            .align_items(Alignment::Center),
-        )
-        .on_press(Message::PlayTrack(track.id))
-        .width(Length::Fill)
-        .padding([7, 10])
-        .style(if is_playing {
-            btn_playing_row_style()
-        } else if is_selected {
-            btn_selected_row_style()
-        } else {
-            btn_item_row_style()
-        });
+            .spacing(4)
+            .width(Length::Fixed(116.0)),
+        ]
+        .spacing(8)
+        .align_items(Alignment::Center);
+
+        let row_btn = button(row_content)
+            .on_press(Message::PlayTrack(track.id))
+            .width(Length::Fill)
+            .padding([7, 10])
+            .style(if is_playing {
+                btn_playing_row_style()
+            } else if is_row_selected || is_checked {
+                btn_selected_row_style()
+            } else {
+                btn_item_row_style()
+            });
 
         track_rows = track_rows.push(row_btn);
     }
 
     let mut content = column![title_row].spacing(8);
-    if let Some(editing) = props.editing_track {
+
+    if let Some(bar) = selection_bar {
+        content = content.push(bar);
+    }
+
+    if props.batch_edit.is_open {
+        content = content.push(render_batch_tag_editor(props.batch_edit, props.selected_track_ids.len()));
+    } else if let Some(editing) = props.editing_track {
         content = content.push(render_tag_editor(editing));
     }
-    content = content.push(col_headers).push(scrollable(track_rows).height(Length::Fill));
+
+    if props.tracks.is_empty() {
+        content = content.push(
+            container(
+                column![
+                    text("No tracks match your current filter or search.").size(15).style(Color::from_rgb8(148, 163, 184)),
+                    button(text("Clear View & Filters").size(13))
+                        .on_press(Message::ClearAll)
+                        .padding([8, 16])
+                        .style(btn_primary_style()),
+                ]
+                .spacing(12)
+                .align_items(Alignment::Center),
+            )
+            .padding(30)
+            .width(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Center),
+        );
+    } else {
+        content = content.push(col_headers).push(scrollable(track_rows).height(Length::Fill));
+    }
 
     container(content)
         .padding(14)
@@ -417,6 +947,98 @@ fn render_track_list<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
         .height(Length::Fill)
         .style(panel_container_style())
         .into()
+}
+
+fn render_batch_tag_editor<'a>(batch: &'a BatchEditState, count: usize) -> Element<'a, Message> {
+    let artist_input = text_input("New Artist for all selected", &batch.artist)
+        .on_input(|s| Message::BatchFieldChanged(BatchField::Artist, s))
+        .padding(8);
+    let album_input = text_input("New Album for all selected", &batch.album)
+        .on_input(|s| Message::BatchFieldChanged(BatchField::Album, s))
+        .padding(8);
+    let genre_input = text_input("New Genre for all selected", &batch.genre)
+        .on_input(|s| Message::BatchFieldChanged(BatchField::Genre, s))
+        .padding(8);
+    let year_input = text_input("Year", &batch.year)
+        .on_input(|s| Message::BatchFieldChanged(BatchField::Year, s))
+        .padding(8)
+        .width(Length::Fixed(80.0));
+    let bpm_input = text_input("BPM", &batch.bpm)
+        .on_input(|s| Message::BatchFieldChanged(BatchField::Bpm, s))
+        .padding(8)
+        .width(Length::Fixed(80.0));
+
+    let artist_row = row![
+        custom_checkbox(batch.apply_artist, "Update Artist", Message::ToggleBatchFieldApply(BatchField::Artist)),
+        artist_input,
+    ]
+    .spacing(8)
+    .align_items(Alignment::Center);
+
+    let album_row = row![
+        custom_checkbox(batch.apply_album, "Update Album", Message::ToggleBatchFieldApply(BatchField::Album)),
+        album_input,
+    ]
+    .spacing(8)
+    .align_items(Alignment::Center);
+
+    let genre_row = row![
+        custom_checkbox(batch.apply_genre, "Update Genre", Message::ToggleBatchFieldApply(BatchField::Genre)),
+        genre_input,
+    ]
+    .spacing(8)
+    .align_items(Alignment::Center);
+
+    let year_bpm_row = row![
+        custom_checkbox(batch.apply_year, "Update Year", Message::ToggleBatchFieldApply(BatchField::Year)),
+        year_input,
+        horizontal_space().width(Length::Fixed(12.0)),
+        custom_checkbox(batch.apply_bpm, "Update BPM", Message::ToggleBatchFieldApply(BatchField::Bpm)),
+        bpm_input,
+    ]
+    .spacing(8)
+    .align_items(Alignment::Center);
+
+    let save_btn = button(
+        row![
+            svg_icon(ICON_EDIT_SVG, 13.0),
+            text(format!("Apply Tags to All {} Tracks", count)).size(13).style(Color::WHITE),
+        ]
+        .spacing(6)
+        .align_items(Alignment::Center),
+    )
+    .on_press(Message::SaveBatchTags)
+    .padding([8, 16])
+    .style(btn_primary_style());
+
+    let cancel_btn = button(text("Cancel").size(13))
+        .on_press(Message::CancelBatchEdit)
+        .padding([8, 14])
+        .style(btn_default_style());
+
+    container(
+        column![
+            row![
+                svg_icon(ICON_EDIT_SVG, 18.0),
+                text(format!("Batch Tag Engine — Editing {} Selected Tracks", count)).size(16).style(Color::WHITE),
+            ]
+            .spacing(8)
+            .align_items(Alignment::Center),
+            text("Check the box next to any field you want to apply to all selected tracks. Unchecked fields are preserved.")
+                .size(12)
+                .style(Color::from_rgb8(148, 163, 184)),
+            artist_row,
+            album_row,
+            genre_row,
+            year_bpm_row,
+            row![save_btn, cancel_btn].spacing(10),
+        ]
+        .spacing(12),
+    )
+    .padding(16)
+    .width(Length::Fill)
+    .style(card_container_style())
+    .into()
 }
 
 fn render_tag_editor<'a>(editing: &'a EditingTrackState) -> Element<'a, Message> {
@@ -435,7 +1057,11 @@ fn render_tag_editor<'a>(editing: &'a EditingTrackState) -> Element<'a, Message>
     let year_input = text_input("Year", &editing.year)
         .on_input(|s| Message::EditFieldChanged(EditField::Year, s))
         .padding(8)
-        .width(Length::Fixed(80.0));
+        .width(Length::Fixed(70.0));
+    let bpm_input = text_input("BPM", &editing.bpm)
+        .on_input(|s| Message::EditFieldChanged(EditField::Bpm, s))
+        .padding(8)
+        .width(Length::Fixed(70.0));
 
     let save_btn = button(
         row![
@@ -458,7 +1084,7 @@ fn render_tag_editor<'a>(editing: &'a EditingTrackState) -> Element<'a, Message>
         column![
             row![
                 svg_icon(ICON_EDIT_SVG, 16.0),
-                text("Mass Tag Engine — Edit Track Metadata").size(15).style(Color::WHITE),
+                text("Edit Track Metadata").size(15).style(Color::WHITE),
             ]
             .spacing(8)
             .align_items(Alignment::Center),
@@ -467,7 +1093,8 @@ fn render_tag_editor<'a>(editing: &'a EditingTrackState) -> Element<'a, Message>
                 column![text("Artist").size(11).style(Color::from_rgb8(148, 163, 184)), artist_input].spacing(4).width(Length::FillPortion(2)),
                 column![text("Album").size(11).style(Color::from_rgb8(148, 163, 184)), album_input].spacing(4).width(Length::FillPortion(2)),
                 column![text("Genre").size(11).style(Color::from_rgb8(148, 163, 184)), genre_input].spacing(4).width(Length::FillPortion(2)),
-                column![text("Year").size(11).style(Color::from_rgb8(148, 163, 184)), year_input].spacing(4).width(Length::Fixed(80.0)),
+                column![text("Year").size(11).style(Color::from_rgb8(148, 163, 184)), year_input].spacing(4).width(Length::Fixed(70.0)),
+                column![text("BPM").size(11).style(Color::from_rgb8(148, 163, 184)), bpm_input].spacing(4).width(Length::Fixed(70.0)),
             ]
             .spacing(10),
             row![save_btn, cancel_btn].spacing(8),
@@ -921,17 +1548,191 @@ fn render_transport_bar<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
     .into()
 }
 
-fn folder_roots(tracks: &[LibraryTrack]) -> Vec<PathBuf> {
-    tracks
-        .iter()
-        .filter_map(|track| track.path.parent().map(PathBuf::from))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
+#[derive(Debug, Clone)]
+pub struct FolderTreeNode {
+    pub name: String,
+    pub path: PathBuf,
+    pub track_count: usize,
+    pub children: Vec<FolderTreeNode>,
+}
+
+pub fn build_folder_tree(tracks: &[LibraryTrack]) -> Vec<FolderTreeNode> {
+    if tracks.is_empty() {
+        return Vec::new();
+    }
+
+    let mut direct_counts: HashMap<PathBuf, usize> = HashMap::new();
+    for track in tracks {
+        if let Some(parent) = track.path.parent() {
+            *direct_counts.entry(parent.to_path_buf()).or_insert(0) += 1;
+        }
+    }
+
+    if direct_counts.is_empty() {
+        return Vec::new();
+    }
+
+    let mut all_dirs: HashSet<PathBuf> = HashSet::new();
+    for dir in direct_counts.keys() {
+        let mut curr: Option<&Path> = Some(dir.as_path());
+        while let Some(p) = curr {
+            all_dirs.insert(p.to_path_buf());
+            curr = p.parent();
+        }
+    }
+
+    let mut total_counts: HashMap<PathBuf, usize> = HashMap::new();
+    for dir in &all_dirs {
+        let count = tracks.iter().filter(|t| t.path.starts_with(dir)).count();
+        total_counts.insert(dir.clone(), count);
+    }
+
+    let mut children_map: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+    let mut root_dirs: Vec<PathBuf> = Vec::new();
+
+    for dir in &all_dirs {
+        match dir.parent() {
+            Some(parent) if all_dirs.contains(parent) => {
+                children_map.entry(parent.to_path_buf()).or_default().push(dir.clone());
+            }
+            _ => {
+                root_dirs.push(dir.clone());
+            }
+        }
+    }
+
+    for children in children_map.values_mut() {
+        children.sort();
+    }
+    root_dirs.sort();
+
+    // If root directory has 0 direct tracks (e.g. "/" or "C:\"), expand to its children
+    let mut effective_roots = Vec::new();
+    for root in root_dirs {
+        if direct_counts.get(&root).copied().unwrap_or(0) == 0 {
+            if let Some(children) = children_map.get(&root) {
+                effective_roots.extend(children.clone());
+                continue;
+            }
+        }
+        effective_roots.push(root);
+    }
+
+    fn build_node(
+        current: PathBuf,
+        direct_counts: &HashMap<PathBuf, usize>,
+        total_counts: &HashMap<PathBuf, usize>,
+        children_map: &HashMap<PathBuf, Vec<PathBuf>>,
+        is_root: bool,
+    ) -> Vec<FolderTreeNode> {
+        let mut curr = current;
+        if is_root {
+            while direct_counts.get(&curr).copied().unwrap_or(0) == 0 {
+                if let Some(children) = children_map.get(&curr) {
+                    if children.len() == 1 {
+                        curr = children[0].clone();
+                        continue;
+                    }
+                }
+                break;
+            }
+        }
+
+        let name = curr
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_else(|| curr.to_str().unwrap_or("Folder"))
+            .to_string();
+
+        let track_count = total_counts.get(&curr).copied().unwrap_or(0);
+
+        let mut child_nodes = Vec::new();
+        if let Some(children) = children_map.get(&curr) {
+            for child in children {
+                let nodes = build_node(child.clone(), direct_counts, total_counts, children_map, false);
+                child_nodes.extend(nodes);
+            }
+        }
+        child_nodes.sort_by_key(|a| a.name.to_lowercase());
+
+        vec![FolderTreeNode {
+            name,
+            path: curr,
+            track_count,
+            children: child_nodes,
+        }]
+    }
+
+    let mut result = Vec::new();
+    for root in effective_roots {
+        let nodes = build_node(root, &direct_counts, &total_counts, &children_map, true);
+        result.extend(nodes);
+    }
+    result.sort_by_key(|a| a.name.to_lowercase());
+    result
 }
 
 fn format_duration(duration: Duration) -> String {
-    format!("{:02}:{:02}", duration.as_secs() / 60, duration.as_secs() % 60)
+    let total_secs = duration.as_secs();
+    let hours = total_secs / 3600;
+    let mins = (total_secs % 3600) / 60;
+    let secs = total_secs % 60;
+    if hours > 0 {
+        format!("{}:{:02}:{:02}", hours, mins, secs)
+    } else {
+        format!("{:02}:{:02}", mins, secs)
+    }
+}
+
+fn custom_checkbox<'a>(checked: bool, label: &str, on_toggle: Message) -> Element<'a, Message> {
+    let check_icon: Element<'a, Message> = if checked {
+        svg_icon(ICON_CHECK_SVG, 11.0)
+    } else {
+        horizontal_space().into()
+    };
+    let box_container = container(check_icon)
+        .width(Length::Fixed(16.0))
+        .height(Length::Fixed(16.0))
+        .style(if checked { checkbox_checked_style() } else { checkbox_unchecked_style() })
+        .align_x(iced::alignment::Horizontal::Center)
+        .align_y(iced::alignment::Vertical::Center);
+
+    button(
+        row![
+            box_container,
+            text(label.to_string()).size(12).style(Color::from_rgb8(226, 232, 240)),
+        ]
+        .spacing(6)
+        .align_items(Alignment::Center),
+    )
+    .on_press(on_toggle)
+    .padding([2, 4])
+    .style(btn_invisible_style())
+    .into()
+}
+
+fn selection_bar_style() -> iced::theme::Container {
+    iced::theme::Container::Custom(Box::new(SelectionBarStyle))
+}
+
+fn checkbox_checked_style() -> iced::theme::Container {
+    iced::theme::Container::Custom(Box::new(CheckboxCheckedStyle))
+}
+
+fn checkbox_unchecked_style() -> iced::theme::Container {
+    iced::theme::Container::Custom(Box::new(CheckboxUncheckedStyle))
+}
+
+fn btn_invisible_style() -> iced::theme::Button {
+    iced::theme::Button::Custom(Box::new(InvisibleButtonStyle))
+}
+
+fn btn_chip_style(is_active: bool) -> iced::theme::Button {
+    if is_active {
+        iced::theme::Button::Custom(Box::new(ChipActiveButtonStyle))
+    } else {
+        iced::theme::Button::Custom(Box::new(ChipInactiveButtonStyle))
+    }
 }
 
 // ==========================================
@@ -1373,4 +2174,145 @@ impl iced::widget::container::StyleSheet for VisualizerBarStyle {
         }
     }
 }
+
+struct SelectionBarStyle;
+impl iced::widget::container::StyleSheet for SelectionBarStyle {
+    type Style = iced::Theme;
+    fn appearance(&self, _style: &Self::Style) -> iced::widget::container::Appearance {
+        iced::widget::container::Appearance {
+            background: Some(Color::from_rgb8(20, 30, 48).into()),
+            text_color: Some(Color::WHITE),
+            border: iced::Border {
+                color: Color::from_rgb8(59, 130, 246),
+                width: 1.0,
+                radius: 8.0.into(),
+            },
+            shadow: iced::Shadow::default(),
+        }
+    }
+}
+
+struct CheckboxCheckedStyle;
+impl iced::widget::container::StyleSheet for CheckboxCheckedStyle {
+    type Style = iced::Theme;
+    fn appearance(&self, _style: &Self::Style) -> iced::widget::container::Appearance {
+        iced::widget::container::Appearance {
+            background: Some(Color::from_rgb8(16, 185, 129).into()),
+            text_color: Some(Color::WHITE),
+            border: iced::Border {
+                color: Color::from_rgb8(52, 211, 153),
+                width: 1.0,
+                radius: 3.0.into(),
+            },
+            shadow: iced::Shadow::default(),
+        }
+    }
+}
+
+struct CheckboxUncheckedStyle;
+impl iced::widget::container::StyleSheet for CheckboxUncheckedStyle {
+    type Style = iced::Theme;
+    fn appearance(&self, _style: &Self::Style) -> iced::widget::container::Appearance {
+        iced::widget::container::Appearance {
+            background: Some(Color::from_rgb8(30, 41, 59).into()),
+            text_color: Some(Color::WHITE),
+            border: iced::Border {
+                color: Color::from_rgb8(71, 85, 105),
+                width: 1.0,
+                radius: 3.0.into(),
+            },
+            shadow: iced::Shadow::default(),
+        }
+    }
+}
+
+struct InvisibleButtonStyle;
+impl iced::widget::button::StyleSheet for InvisibleButtonStyle {
+    type Style = iced::Theme;
+    fn active(&self, _style: &Self::Style) -> iced::widget::button::Appearance {
+        iced::widget::button::Appearance {
+            background: None,
+            text_color: Color::from_rgb8(203, 213, 225),
+            border: iced::Border::default(),
+            shadow_offset: iced::Vector::default(),
+            shadow: iced::Shadow::default(),
+        }
+    }
+    fn hovered(&self, _style: &Self::Style) -> iced::widget::button::Appearance {
+        iced::widget::button::Appearance {
+            background: Some(Color::from_rgba(1.0, 1.0, 1.0, 0.07).into()),
+            text_color: Color::WHITE,
+            border: iced::Border {
+                color: Color::TRANSPARENT,
+                width: 0.0,
+                radius: 4.0.into(),
+            },
+            shadow_offset: iced::Vector::default(),
+            shadow: iced::Shadow::default(),
+        }
+    }
+}
+
+struct ChipActiveButtonStyle;
+impl iced::widget::button::StyleSheet for ChipActiveButtonStyle {
+    type Style = iced::Theme;
+    fn active(&self, _style: &Self::Style) -> iced::widget::button::Appearance {
+        iced::widget::button::Appearance {
+            background: Some(Color::from_rgb8(16, 185, 129).into()),
+            text_color: Color::WHITE,
+            border: iced::Border {
+                color: Color::from_rgb8(52, 211, 153),
+                width: 1.0,
+                radius: 12.0.into(),
+            },
+            shadow_offset: iced::Vector::default(),
+            shadow: iced::Shadow::default(),
+        }
+    }
+    fn hovered(&self, _style: &Self::Style) -> iced::widget::button::Appearance {
+        iced::widget::button::Appearance {
+            background: Some(Color::from_rgb8(5, 150, 105).into()),
+            text_color: Color::WHITE,
+            border: iced::Border {
+                color: Color::from_rgb8(110, 231, 183),
+                width: 1.0,
+                radius: 12.0.into(),
+            },
+            shadow_offset: iced::Vector::default(),
+            shadow: iced::Shadow::default(),
+        }
+    }
+}
+
+struct ChipInactiveButtonStyle;
+impl iced::widget::button::StyleSheet for ChipInactiveButtonStyle {
+    type Style = iced::Theme;
+    fn active(&self, _style: &Self::Style) -> iced::widget::button::Appearance {
+        iced::widget::button::Appearance {
+            background: Some(Color::from_rgb8(24, 30, 44).into()),
+            text_color: Color::from_rgb8(148, 163, 184),
+            border: iced::Border {
+                color: Color::from_rgb8(42, 52, 72),
+                width: 1.0,
+                radius: 12.0.into(),
+            },
+            shadow_offset: iced::Vector::default(),
+            shadow: iced::Shadow::default(),
+        }
+    }
+    fn hovered(&self, _style: &Self::Style) -> iced::widget::button::Appearance {
+        iced::widget::button::Appearance {
+            background: Some(Color::from_rgb8(33, 41, 58).into()),
+            text_color: Color::WHITE,
+            border: iced::Border {
+                color: Color::from_rgb8(71, 85, 105),
+                width: 1.0,
+                radius: 12.0.into(),
+            },
+            shadow_offset: iced::Vector::default(),
+            shadow: iced::Shadow::default(),
+        }
+    }
+}
+
 

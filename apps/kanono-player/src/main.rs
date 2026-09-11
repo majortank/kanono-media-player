@@ -3,7 +3,7 @@ mod plugins;
 mod ui;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
@@ -37,9 +37,136 @@ fn main() -> iced::Result {
 pub enum NavTab {
     #[default]
     Library,
+    MostPlayed,
     Queue,
     Folders,
     Info,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FilterCategory {
+    #[default]
+    All,
+    Artists,
+    Albums,
+    Genres,
+    Folders,
+    Duration,
+    Year,
+    Bpm,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurationFilter {
+    Short,     // < 2 mins (120s)
+    Medium,    // 2 - 4 mins (120s - 240s)
+    Long,      // 4 - 6 mins (240s - 360s)
+    ExtraLong, // > 6 mins (360s+)
+}
+
+impl DurationFilter {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Short => "< 2 min",
+            Self::Medium => "2 - 4 min",
+            Self::Long => "4 - 6 min",
+            Self::ExtraLong => "> 6 min",
+        }
+    }
+    pub fn matches(&self, d: Option<Duration>) -> bool {
+        let Some(d) = d else { return false };
+        let s = d.as_secs();
+        match self {
+            Self::Short => s < 120,
+            Self::Medium => (120..240).contains(&s),
+            Self::Long => (240..360).contains(&s),
+            Self::ExtraLong => s >= 360,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BpmFilter {
+    Slow,       // < 90 BPM
+    Medium,     // 90 - 120 BPM
+    Fast,       // 120 - 140 BPM
+    HighEnergy, // > 140 BPM
+}
+
+impl BpmFilter {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Slow => "< 90 (Chill)",
+            Self::Medium => "90 - 120 (Mid)",
+            Self::Fast => "120 - 140 (Upbeat)",
+            Self::HighEnergy => "> 140 (Energy)",
+        }
+    }
+    pub fn matches(&self, b: Option<u32>) -> bool {
+        let Some(b) = b else { return false };
+        match self {
+            Self::Slow => b < 90,
+            Self::Medium => (90..=120).contains(&b),
+            Self::Fast => (121..=140).contains(&b),
+            Self::HighEnergy => b > 140,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FilterState {
+    pub active_category: FilterCategory,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub genre: Option<String>,
+    pub duration: Option<DurationFilter>,
+    pub year: Option<i32>,
+    pub bpm: Option<BpmFilter>,
+}
+
+impl FilterState {
+    pub fn is_any_active(&self) -> bool {
+        self.artist.is_some()
+            || self.album.is_some()
+            || self.genre.is_some()
+            || self.duration.is_some()
+            || self.year.is_some()
+            || self.bpm.is_some()
+    }
+
+    pub fn clear(&mut self) {
+        self.artist = None;
+        self.album = None;
+        self.genre = None;
+        self.duration = None;
+        self.year = None;
+        self.bpm = None;
+        self.active_category = FilterCategory::All;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchField {
+    Artist,
+    Album,
+    Genre,
+    Year,
+    Bpm,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BatchEditState {
+    pub is_open: bool,
+    pub apply_artist: bool,
+    pub artist: String,
+    pub apply_album: bool,
+    pub album: String,
+    pub apply_genre: bool,
+    pub genre: String,
+    pub apply_year: bool,
+    pub year: String,
+    pub apply_bpm: bool,
+    pub bpm: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +176,7 @@ pub enum EditField {
     Album,
     Genre,
     Year,
+    Bpm,
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +187,7 @@ pub struct EditingTrackState {
     pub album: String,
     pub genre: String,
     pub year: String,
+    pub bpm: String,
 }
 
 #[derive(Clone)]
@@ -97,9 +226,13 @@ pub struct KanonoApp {
     all_tracks: Vec<LibraryTrack>,
     visible_tracks: Vec<LibraryTrack>,
     selected_folder: Option<PathBuf>,
+    expanded_folders: HashSet<PathBuf>,
     current_tab: NavTab,
+    filter_state: FilterState,
     search: String,
     selected_track: Option<i64>,
+    selected_track_ids: HashSet<i64>,
+    batch_edit: BatchEditState,
     current_playing_track_id: Option<i64>,
     queued_track_ids: Vec<i64>,
     is_playing: bool,
@@ -119,6 +252,7 @@ pub struct KanonoApp {
     editing_track: Option<EditingTrackState>,
     current_track_samples: Option<Arc<Vec<f32>>>,
     status_message: Option<String>,
+    played_tracked_for_current: bool,
 }
 
 #[derive(Default)]
@@ -140,8 +274,32 @@ pub enum Message {
     LibraryIndexed(IndexResult),
     SearchChanged(String),
     SelectFolder(Option<PathBuf>),
+    ToggleFolderExpanded(PathBuf),
+    PlayFolder(PathBuf),
+    QueueFolder(PathBuf),
     SelectTab(NavTab),
+    PlayMostPlayed,
+    QueueMostPlayed,
+    SelectFilterCategory(FilterCategory),
+    SetArtistFilter(Option<String>),
+    SetAlbumFilter(Option<String>),
+    SetGenreFilter(Option<String>),
+    SetDurationFilter(Option<DurationFilter>),
+    SetYearFilter(Option<i32>),
+    SetBpmFilter(Option<BpmFilter>),
+    ClearFilters,
+    ClearAll,
     SelectTrack(i64),
+    ToggleTrackSelection(i64),
+    SelectAllVisibleTracks,
+    ClearTrackSelection,
+    PlaySelectedTracks,
+    QueueSelectedTracks,
+    StartBatchEdit,
+    BatchFieldChanged(BatchField, String),
+    ToggleBatchFieldApply(BatchField),
+    SaveBatchTags,
+    CancelBatchEdit,
     QueueTrack(i64),
     RemoveFromQueue(usize),
     ClearQueue,
@@ -165,6 +323,7 @@ pub enum Message {
     CancelEditTrack,
     GenerateSampleAudio,
     SampleAudioGenerated(Result<Vec<LibraryTrack>, String>),
+    DurationsBatchResolved(Vec<(i64, Duration)>),
 }
 
 impl Application for KanonoApp {
@@ -191,44 +350,48 @@ impl Application for KanonoApp {
         let all_tracks = library.query(&TrackQuery::default()).unwrap_or_default();
         let replaygain_worker = Arc::new(ReplayGainWorker::spawn());
         let (decode_tx, decode_rx) = crossbeam_channel::unbounded();
-        (
-            Self {
-                playback: PlaybackViewState::default(),
-                playback_sender,
-                playback_receiver,
-                audio_output,
-                playback_generation: Arc::new(AtomicU64::new(0)),
-                mpris_commands: mpris.commands,
-                mpris_state: mpris.state,
-                components,
-                visible_tracks: all_tracks.clone(),
-                all_tracks,
-                selected_folder: None,
-                current_tab: NavTab::Library,
-                search: String::new(),
-                selected_track: None,
-                current_playing_track_id: None,
-                queued_track_ids: Vec::new(),
-                is_playing: false,
-                volume: 0.85,
-                is_muted: false,
-                prev_volume: 0.85,
-                is_shuffled: false,
-                is_repeated: false,
-                replaygain_enabled: true,
-                gapless_enabled: true,
-                preloaded_track: None,
-                seeking_fraction: None,
-                decode_tx,
-                decode_rx,
-                track_gains: HashMap::new(),
-                replaygain_worker,
-                editing_track: None,
-                current_track_samples: None,
-                status_message: None,
-            },
-            Command::none(),
-        )
+        let mut app = Self {
+            playback: PlaybackViewState::default(),
+            playback_sender,
+            playback_receiver,
+            audio_output,
+            playback_generation: Arc::new(AtomicU64::new(0)),
+            mpris_commands: mpris.commands,
+            mpris_state: mpris.state,
+            components,
+            visible_tracks: all_tracks.clone(),
+            all_tracks,
+            selected_folder: None,
+            expanded_folders: HashSet::new(),
+            current_tab: NavTab::Library,
+            filter_state: FilterState::default(),
+            search: String::new(),
+            selected_track: None,
+            selected_track_ids: HashSet::new(),
+            batch_edit: BatchEditState::default(),
+            current_playing_track_id: None,
+            queued_track_ids: Vec::new(),
+            is_playing: false,
+            volume: 0.85,
+            is_muted: false,
+            prev_volume: 0.85,
+            is_shuffled: false,
+            is_repeated: false,
+            replaygain_enabled: true,
+            gapless_enabled: true,
+            preloaded_track: None,
+            seeking_fraction: None,
+            decode_tx,
+            decode_rx,
+            track_gains: HashMap::new(),
+            replaygain_worker,
+            editing_track: None,
+            current_track_samples: None,
+            status_message: None,
+            played_tracked_for_current: false,
+        };
+        app.refresh_visible_tracks();
+        (app, resolve_missing_durations())
     }
 
     fn title(&self) -> String {
@@ -267,7 +430,10 @@ impl Application for KanonoApp {
                     }
                 }
             }
-            Message::LibraryIndexed(result) => self.apply_index_result(result),
+            Message::LibraryIndexed(result) => {
+                self.apply_index_result(result);
+                return resolve_missing_durations();
+            }
             Message::SearchChanged(search) => {
                 self.search = search;
                 self.refresh_visible_tracks();
@@ -277,15 +443,251 @@ impl Application for KanonoApp {
                 self.current_tab = NavTab::Folders;
                 self.refresh_visible_tracks();
             }
+            Message::ToggleFolderExpanded(folder) => {
+                if self.expanded_folders.contains(&folder) {
+                    self.expanded_folders.remove(&folder);
+                } else {
+                    self.expanded_folders.insert(folder);
+                }
+            }
+            Message::PlayFolder(folder) => {
+                let folder_tracks: Vec<i64> = self
+                    .all_tracks
+                    .iter()
+                    .filter(|t| t.path.starts_with(&folder))
+                    .map(|t| t.id)
+                    .collect();
+                if let Some(&first_id) = folder_tracks.first() {
+                    self.play_track(first_id);
+                    self.queued_track_ids = folder_tracks.into_iter().skip(1).collect();
+                    let folder_name = folder.file_name().and_then(|n| n.to_str()).unwrap_or("Folder");
+                    self.status_message = Some(format!("Playing folder: {}", folder_name));
+                }
+            }
+            Message::QueueFolder(folder) => {
+                let folder_tracks: Vec<i64> = self
+                    .all_tracks
+                    .iter()
+                    .filter(|t| t.path.starts_with(&folder))
+                    .map(|t| t.id)
+                    .collect();
+                let count = folder_tracks.len();
+                self.queued_track_ids.extend(folder_tracks);
+                let folder_name = folder.file_name().and_then(|n| n.to_str()).unwrap_or("Folder");
+                self.status_message = Some(format!("Added {} tracks from {} to queue", count, folder_name));
+            }
             Message::SelectTab(tab) => {
                 self.current_tab = tab;
                 if tab == NavTab::Library {
                     self.selected_folder = None;
                     self.refresh_visible_tracks();
+                } else if tab == NavTab::MostPlayed {
+                    self.refresh_visible_tracks();
                 }
+            }
+            Message::PlayMostPlayed => {
+                let mut list = self.all_tracks.clone();
+                list.sort_by_key(|a| std::cmp::Reverse(a.play_count));
+                if let Some(first) = list.first() {
+                    let first_id = first.id;
+                    self.play_track(first_id);
+                    self.queued_track_ids = list.into_iter().skip(1).map(|t| t.id).collect();
+                    self.status_message = Some("Playing frequently played tracks".to_string());
+                }
+            }
+            Message::QueueMostPlayed => {
+                let mut list = self.all_tracks.clone();
+                list.sort_by_key(|a| std::cmp::Reverse(a.play_count));
+                let count = list.len();
+                self.queued_track_ids = list.into_iter().map(|t| t.id).collect();
+                self.status_message = Some(format!("Queued {} frequently played tracks", count));
+            }
+            Message::SelectFilterCategory(cat) => {
+                self.filter_state.active_category = cat;
+            }
+            Message::SetArtistFilter(artist) => {
+                self.filter_state.artist = artist;
+                self.refresh_visible_tracks();
+            }
+            Message::SetAlbumFilter(album) => {
+                self.filter_state.album = album;
+                self.refresh_visible_tracks();
+            }
+            Message::SetGenreFilter(genre) => {
+                self.filter_state.genre = genre;
+                self.refresh_visible_tracks();
+            }
+            Message::SetDurationFilter(dur) => {
+                self.filter_state.duration = dur;
+                self.refresh_visible_tracks();
+            }
+            Message::SetYearFilter(year) => {
+                self.filter_state.year = year;
+                self.refresh_visible_tracks();
+            }
+            Message::SetBpmFilter(bpm) => {
+                self.filter_state.bpm = bpm;
+                self.refresh_visible_tracks();
+            }
+            Message::ClearFilters => {
+                self.filter_state.clear();
+                self.selected_folder = None;
+                self.refresh_visible_tracks();
+                self.status_message = Some("Filters cleared".to_string());
+            }
+            Message::ClearAll => {
+                self.filter_state.clear();
+                self.selected_folder = None;
+                self.search.clear();
+                self.selected_track_ids.clear();
+                self.batch_edit.is_open = false;
+                self.editing_track = None;
+                if self.current_tab != NavTab::Queue && self.current_tab != NavTab::Info {
+                    self.current_tab = NavTab::Library;
+                }
+                self.refresh_visible_tracks();
+                self.status_message = Some("View and filters cleared".to_string());
             }
             Message::SelectTrack(track_id) => {
                 self.selected_track = Some(track_id);
+            }
+            Message::ToggleTrackSelection(id) => {
+                if self.selected_track_ids.contains(&id) {
+                    self.selected_track_ids.remove(&id);
+                } else {
+                    self.selected_track_ids.insert(id);
+                }
+            }
+            Message::SelectAllVisibleTracks => {
+                let all_selected = !self.visible_tracks.is_empty()
+                    && self.visible_tracks.iter().all(|t| self.selected_track_ids.contains(&t.id));
+                if all_selected {
+                    for t in &self.visible_tracks {
+                        self.selected_track_ids.remove(&t.id);
+                    }
+                } else {
+                    for t in &self.visible_tracks {
+                        self.selected_track_ids.insert(t.id);
+                    }
+                }
+            }
+            Message::ClearTrackSelection => {
+                self.selected_track_ids.clear();
+                self.batch_edit.is_open = false;
+            }
+            Message::PlaySelectedTracks => {
+                let selected: Vec<i64> = self
+                    .visible_tracks
+                    .iter()
+                    .filter(|t| self.selected_track_ids.contains(&t.id))
+                    .map(|t| t.id)
+                    .collect();
+                if let Some(&first_id) = selected.first() {
+                    self.play_track(first_id);
+                    self.queued_track_ids = selected.into_iter().skip(1).collect();
+                    self.status_message = Some("Playing selected tracks".to_string());
+                }
+            }
+            Message::QueueSelectedTracks => {
+                let selected: Vec<i64> = self
+                    .visible_tracks
+                    .iter()
+                    .filter(|t| self.selected_track_ids.contains(&t.id))
+                    .map(|t| t.id)
+                    .collect();
+                let count = selected.len();
+                self.queued_track_ids.extend(selected);
+                self.status_message = Some(format!("Added {} tracks to queue", count));
+            }
+            Message::StartBatchEdit => {
+                if !self.selected_track_ids.is_empty() {
+                    let selected_tracks: Vec<&LibraryTrack> = self
+                        .all_tracks
+                        .iter()
+                        .filter(|t| self.selected_track_ids.contains(&t.id))
+                        .collect();
+                    let common_artist = selected_tracks.first().map(|t| t.artist.clone()).unwrap_or_default();
+                    let all_same_artist = selected_tracks.iter().all(|t| t.artist == common_artist);
+
+                    let common_album = selected_tracks.first().map(|t| t.album.clone()).unwrap_or_default();
+                    let all_same_album = selected_tracks.iter().all(|t| t.album == common_album);
+
+                    let common_genre = selected_tracks.first().map(|t| t.genre.clone()).unwrap_or_default();
+                    let all_same_genre = selected_tracks.iter().all(|t| t.genre == common_genre);
+
+                    self.batch_edit = BatchEditState {
+                        is_open: true,
+                        apply_artist: all_same_artist,
+                        artist: if all_same_artist { common_artist } else { String::new() },
+                        apply_album: all_same_album,
+                        album: if all_same_album { common_album } else { String::new() },
+                        apply_genre: all_same_genre,
+                        genre: if all_same_genre { common_genre } else { String::new() },
+                        apply_year: false,
+                        year: String::new(),
+                        apply_bpm: false,
+                        bpm: String::new(),
+                    };
+                }
+            }
+            Message::BatchFieldChanged(field, val) => {
+                match field {
+                    BatchField::Artist => {
+                        self.batch_edit.artist = val;
+                        self.batch_edit.apply_artist = true;
+                    }
+                    BatchField::Album => {
+                        self.batch_edit.album = val;
+                        self.batch_edit.apply_album = true;
+                    }
+                    BatchField::Genre => {
+                        self.batch_edit.genre = val;
+                        self.batch_edit.apply_genre = true;
+                    }
+                    BatchField::Year => {
+                        self.batch_edit.year = val;
+                        self.batch_edit.apply_year = true;
+                    }
+                    BatchField::Bpm => {
+                        self.batch_edit.bpm = val;
+                        self.batch_edit.apply_bpm = true;
+                    }
+                }
+            }
+            Message::ToggleBatchFieldApply(field) => {
+                match field {
+                    BatchField::Artist => self.batch_edit.apply_artist = !self.batch_edit.apply_artist,
+                    BatchField::Album => self.batch_edit.apply_album = !self.batch_edit.apply_album,
+                    BatchField::Genre => self.batch_edit.apply_genre = !self.batch_edit.apply_genre,
+                    BatchField::Year => self.batch_edit.apply_year = !self.batch_edit.apply_year,
+                    BatchField::Bpm => self.batch_edit.apply_bpm = !self.batch_edit.apply_bpm,
+                }
+            }
+            Message::SaveBatchTags => {
+                if self.batch_edit.is_open && !self.selected_track_ids.is_empty() {
+                    let track_ids: Vec<i64> = self.selected_track_ids.iter().copied().collect();
+                    let update = TagUpdate {
+                        title: None,
+                        artist: if self.batch_edit.apply_artist { Some(self.batch_edit.artist.trim().to_string()) } else { None },
+                        album: if self.batch_edit.apply_album { Some(self.batch_edit.album.trim().to_string()) } else { None },
+                        genre: if self.batch_edit.apply_genre { Some(self.batch_edit.genre.trim().to_string()) } else { None },
+                        year: if self.batch_edit.apply_year { self.batch_edit.year.trim().parse::<i32>().ok() } else { None },
+                        bpm: if self.batch_edit.apply_bpm { self.batch_edit.bpm.trim().parse::<u32>().ok() } else { None },
+                    };
+                    let db_path = library_database_path();
+                    if let Ok(mut db) = LibraryDatabase::open(db_path) {
+                        let _ = db.mass_tag(&track_ids, &update);
+                        if let Ok(tracks) = db.query(&TrackQuery::default()) {
+                            self.all_tracks = tracks;
+                            self.refresh_visible_tracks();
+                            self.status_message = Some(format!("Updated tags for {} tracks", track_ids.len()));
+                        }
+                    }
+                    self.batch_edit.is_open = false;
+                }
+            }
+            Message::CancelBatchEdit => {
+                self.batch_edit.is_open = false;
             }
             Message::QueueTrack(track_id) => {
                 self.queued_track_ids.push(track_id);
@@ -403,6 +805,7 @@ impl Application for KanonoApp {
                         album: track.album.clone(),
                         genre: track.genre.clone(),
                         year: track.year.map(|y| y.to_string()).unwrap_or_default(),
+                        bpm: track.bpm.map(|b| b.to_string()).unwrap_or_default(),
                     });
                 }
             }
@@ -414,18 +817,21 @@ impl Application for KanonoApp {
                         EditField::Album => editing.album = value,
                         EditField::Genre => editing.genre = value,
                         EditField::Year => editing.year = value,
+                        EditField::Bpm => editing.bpm = value,
                     }
                 }
             }
             Message::SaveTrackTags => {
                 if let Some(editing) = self.editing_track.take() {
                     let year_parsed = editing.year.trim().parse::<i32>().ok();
+                    let bpm_parsed = editing.bpm.trim().parse::<u32>().ok();
                     let update = TagUpdate {
                         title: Some(editing.title.trim().to_string()),
                         artist: Some(editing.artist.trim().to_string()),
                         album: Some(editing.album.trim().to_string()),
                         genre: Some(editing.genre.trim().to_string()),
                         year: year_parsed,
+                        bpm: bpm_parsed,
                     };
                     let db_path = library_database_path();
                     if let Ok(mut db) = LibraryDatabase::open(db_path) {
@@ -454,11 +860,22 @@ impl Application for KanonoApp {
                     if let Some(first) = self.visible_tracks.first() {
                         self.play_track(first.id);
                     }
+                    return resolve_missing_durations();
                 }
                 Err(e) => {
                     eprintln!("Failed to generate sample audio: {e}");
                 }
             },
+            Message::DurationsBatchResolved(resolved) => {
+                for (id, dur) in resolved {
+                    if let Some(t) = self.all_tracks.iter_mut().find(|t| t.id == id) {
+                        t.duration = Some(dur);
+                    }
+                    if let Some(t) = self.visible_tracks.iter_mut().find(|t| t.id == id) {
+                        t.duration = Some(dur);
+                    }
+                }
+            }
         }
         Command::none()
     }
@@ -468,9 +885,13 @@ impl Application for KanonoApp {
             tracks: &self.visible_tracks,
             all_tracks: &self.all_tracks,
             selected_folder: self.selected_folder.as_ref(),
+            expanded_folders: &self.expanded_folders,
             current_tab: self.current_tab,
+            filter_state: &self.filter_state,
             search: &self.search,
             selected_track: self.selected_track,
+            selected_track_ids: &self.selected_track_ids,
+            batch_edit: &self.batch_edit,
             current_playing_track_id: self.current_playing_track_id,
             queued_track_ids: &self.queued_track_ids,
             is_playing: self.is_playing,
@@ -655,6 +1076,16 @@ impl KanonoApp {
                 }
                 self.playback.metadata = metadata;
                 self.playback.metadata.duration = Some(exact_duration);
+                if let Some(t) = self.all_tracks.iter_mut().find(|t| t.id == track_id) {
+                    t.duration = Some(exact_duration);
+                }
+                if let Some(t) = self.visible_tracks.iter_mut().find(|t| t.id == track_id) {
+                    t.duration = Some(exact_duration);
+                }
+                let db_path = library_database_path();
+                if let Ok(mut db) = LibraryDatabase::open(db_path) {
+                    let _ = db.update_duration(track_id, exact_duration);
+                }
                 self.current_track_samples = Some(Arc::clone(&samples));
                 self.current_playing_track_id = Some(track_id);
                 self.selected_track = Some(track_id);
@@ -688,6 +1119,16 @@ impl KanonoApp {
                 samples,
                 exact_duration,
             } => {
+                if let Some(t) = self.all_tracks.iter_mut().find(|t| t.id == track_id) {
+                    t.duration = Some(exact_duration);
+                }
+                if let Some(t) = self.visible_tracks.iter_mut().find(|t| t.id == track_id) {
+                    t.duration = Some(exact_duration);
+                }
+                let db_path = library_database_path();
+                if let Ok(mut db) = LibraryDatabase::open(db_path) {
+                    let _ = db.update_duration(track_id, exact_duration);
+                }
                 if self.current_playing_track_id == for_playing_id {
                     let mut meta = metadata;
                     meta.duration = Some(exact_duration);
@@ -791,6 +1232,26 @@ impl KanonoApp {
         self.mpris_state.set_metadata(self.playback.metadata.clone());
 
         if self.is_playing {
+            // Check for play counting (>= 10s playback counts as a play)
+            if !self.played_tracked_for_current {
+                if let Some(curr_id) = self.current_playing_track_id {
+                    if self.playback.elapsed >= Duration::from_secs(10) {
+                        self.played_tracked_for_current = true;
+                        let db_path = library_database_path();
+                        if let Ok(mut db) = LibraryDatabase::open(db_path) {
+                            if let Ok(new_count) = db.record_play(curr_id) {
+                                if let Some(t) = self.all_tracks.iter_mut().find(|t| t.id == curr_id) {
+                                    t.play_count = new_count;
+                                }
+                                if let Some(t) = self.visible_tracks.iter_mut().find(|t| t.id == curr_id) {
+                                    t.play_count = new_count;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             if let (Some(output), Some(samples)) = (&self.audio_output, &self.current_track_samples) {
                 let channels = usize::from(output.config.channels).max(1);
                 let total_frames = (samples.len() / channels) as u64;
@@ -804,10 +1265,42 @@ impl KanonoApp {
                 );
 
                 if track_finished {
+                    if !self.played_tracked_for_current {
+                        if let Some(curr_id) = self.current_playing_track_id {
+                            self.played_tracked_for_current = true;
+                            let db_path = library_database_path();
+                            if let Ok(mut db) = LibraryDatabase::open(db_path) {
+                                if let Ok(new_count) = db.record_play(curr_id) {
+                                    if let Some(t) = self.all_tracks.iter_mut().find(|t| t.id == curr_id) {
+                                        t.play_count = new_count;
+                                    }
+                                    if let Some(t) = self.visible_tracks.iter_mut().find(|t| t.id == curr_id) {
+                                        t.play_count = new_count;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     self.play_next();
                 }
             } else if let Some(dur) = self.playback.metadata.duration {
                 if dur.as_secs() > 0 && self.playback.elapsed >= dur {
+                    if !self.played_tracked_for_current {
+                        if let Some(curr_id) = self.current_playing_track_id {
+                            self.played_tracked_for_current = true;
+                            let db_path = library_database_path();
+                            if let Ok(mut db) = LibraryDatabase::open(db_path) {
+                                if let Ok(new_count) = db.record_play(curr_id) {
+                                    if let Some(t) = self.all_tracks.iter_mut().find(|t| t.id == curr_id) {
+                                        t.play_count = new_count;
+                                    }
+                                    if let Some(t) = self.visible_tracks.iter_mut().find(|t| t.id == curr_id) {
+                                        t.play_count = new_count;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     self.play_next();
                 }
             }
@@ -838,25 +1331,56 @@ impl KanonoApp {
     }
 
     fn refresh_visible_tracks(&mut self) {
-        let search = self.search.to_ascii_lowercase();
-        self.visible_tracks = self
-            .all_tracks
-            .iter()
-            .filter(|track| {
-                let matches_folder = self
-                    .selected_folder
-                    .as_ref()
-                    .map(|folder| track.path.starts_with(folder))
-                    .unwrap_or(true);
-                let haystack = format!("{} {} {} {}", track.title, track.artist, track.album, track.genre)
-                    .to_ascii_lowercase();
-                matches_folder && (search.is_empty() || haystack.contains(&search))
-            })
-            .cloned()
-            .collect();
+        let search = self.search.trim().to_ascii_lowercase();
+
+        let mut tracks: Vec<LibraryTrack> = match self.current_tab {
+            NavTab::MostPlayed => {
+                let mut list = self.all_tracks.clone();
+                list.sort_by(|a, b| b.play_count.cmp(&a.play_count).then_with(|| a.title.cmp(&b.title)));
+                list
+            }
+            _ => self.all_tracks.clone(),
+        };
+
+        if let Some(folder) = &self.selected_folder {
+            tracks.retain(|t| t.path.starts_with(folder));
+        }
+
+        if let Some(artist) = &self.filter_state.artist {
+            tracks.retain(|t| t.artist.eq_ignore_ascii_case(artist));
+        }
+        if let Some(album) = &self.filter_state.album {
+            tracks.retain(|t| t.album.eq_ignore_ascii_case(album));
+        }
+        if let Some(genre) = &self.filter_state.genre {
+            tracks.retain(|t| t.genre.eq_ignore_ascii_case(genre));
+        }
+        if let Some(year) = self.filter_state.year {
+            tracks.retain(|t| t.year == Some(year));
+        }
+        if let Some(dur_filter) = self.filter_state.duration {
+            tracks.retain(|t| dur_filter.matches(t.duration));
+        }
+        if let Some(bpm_filter) = self.filter_state.bpm {
+            tracks.retain(|t| bpm_filter.matches(t.bpm));
+        }
+
+        if !search.is_empty() {
+            tracks.retain(|t| {
+                let path_str = t.path.to_string_lossy();
+                t.title.to_ascii_lowercase().contains(&search)
+                    || t.artist.to_ascii_lowercase().contains(&search)
+                    || t.album.to_ascii_lowercase().contains(&search)
+                    || t.genre.to_ascii_lowercase().contains(&search)
+                    || path_str.to_ascii_lowercase().contains(&search)
+            });
+        }
+
+        self.visible_tracks = tracks;
     }
 
     fn play_track(&mut self, track_id: i64) {
+        self.played_tracked_for_current = false;
         let Some((path, metadata)) = self.all_tracks.iter().find(|track| track.id == track_id).map(|track| {
             (
                 track.path.clone(),
@@ -1233,6 +1757,39 @@ async fn create_and_index_demo_tracks() -> Result<Vec<LibraryTrack>, String> {
     .map_err(|e| e.to_string())?
 }
 
+fn resolve_missing_durations() -> Command<Message> {
+    Command::perform(
+        async {
+            let database_path = library_database_path();
+            tokio::task::spawn_blocking(move || -> Vec<(i64, Duration)> {
+                let mut resolved = Vec::new();
+                let Ok(mut db) = LibraryDatabase::open(&database_path) else { return resolved };
+                let Ok(tracks) = db.query(&TrackQuery::default()) else { return resolved };
+                for t in tracks {
+                    if t.duration.is_none() {
+                        let dur = kanono_audio_engine::read_track(&t.path)
+                            .ok()
+                            .and_then(|info| info.duration)
+                            .or_else(|| {
+                                kanono_audio_engine::decode_track(&t.path)
+                                    .ok()
+                                    .and_then(|probed| probed.metadata.duration)
+                            });
+                        if let Some(d) = dur {
+                            let _ = db.update_duration(t.id, d);
+                            resolved.push((t.id, d));
+                        }
+                    }
+                }
+                resolved
+            })
+            .await
+            .unwrap_or_default()
+        },
+        Message::DurationsBatchResolved,
+    )
+}
+
 fn write_synth_wav(
     path: &Path,
     sample_rate: u32,
@@ -1367,5 +1924,104 @@ mod tests {
             (queue_empty && played_near_eof + (sample_rate / 10) >= total_frames)
         );
         assert!(near_eof_finished);
+    }
+
+    #[test]
+    fn test_filter_state_matching() {
+        let mut filter = FilterState::default();
+        assert!(!filter.is_any_active());
+
+        filter.duration = Some(DurationFilter::Short);
+        assert!(filter.is_any_active());
+        assert!(filter.duration.unwrap().matches(Some(Duration::from_secs(90))));
+        assert!(!filter.duration.unwrap().matches(Some(Duration::from_secs(200))));
+
+        filter.bpm = Some(BpmFilter::Fast);
+        assert!(filter.bpm.unwrap().matches(Some(130)));
+        assert!(!filter.bpm.unwrap().matches(Some(80)));
+
+        filter.clear();
+        assert!(!filter.is_any_active());
+    }
+
+    #[test]
+    fn test_folder_tree_hierarchical_building() {
+        use crate::ui::build_folder_tree;
+
+        let tracks = vec![
+            LibraryTrack {
+                id: 1,
+                path: PathBuf::from("/music/Rock/Queen/Bohemian.mp3"),
+                title: "Bohemian".into(),
+                artist: "Queen".into(),
+                album: "Opera".into(),
+                genre: "Rock".into(),
+                year: Some(1975),
+                duration: Some(Duration::from_secs(354)),
+                play_count: 10,
+                bpm: Some(72),
+                track_number: Some(1),
+            },
+            LibraryTrack {
+                id: 2,
+                path: PathBuf::from("/music/Rock/Queen/RadioGaGa.mp3"),
+                title: "Radio Ga Ga".into(),
+                artist: "Queen".into(),
+                album: "Works".into(),
+                genre: "Rock".into(),
+                year: Some(1984),
+                duration: Some(Duration::from_secs(348)),
+                play_count: 5,
+                bpm: Some(112),
+                track_number: Some(2),
+            },
+            LibraryTrack {
+                id: 3,
+                path: PathBuf::from("/music/Jazz/Miles/SoWhat.mp3"),
+                title: "So What".into(),
+                artist: "Miles Davis".into(),
+                album: "Kind of Blue".into(),
+                genre: "Jazz".into(),
+                year: Some(1959),
+                duration: Some(Duration::from_secs(562)),
+                play_count: 8,
+                bpm: Some(136),
+                track_number: Some(1),
+            },
+        ];
+
+        let tree = build_folder_tree(&tracks);
+        assert!(!tree.is_empty());
+        let total_tracks: usize = tree.iter().map(|n| n.track_count).sum();
+        assert_eq!(total_tracks, 3);
+    }
+
+    #[test]
+    fn test_wav_duration_resolution() {
+        let p = PathBuf::from("/tmp/kanono_demo_music/01 - Kanono Groove.wav");
+        if p.exists() {
+            let track = kanono_audio_engine::read_track(&p).expect("read_track on demo wav");
+            assert!(track.duration.is_some(), "WAV duration must be parsed from header");
+            let d = track.duration.unwrap();
+            assert!(d.as_secs() > 0, "Duration must be greater than 0");
+        }
+    }
+
+    #[test]
+    fn test_user_db_migration() {
+        let db_path = library_database_path();
+        if db_path.exists() {
+            let mut db = LibraryDatabase::open(&db_path).expect("open user db");
+            let tracks = db.query(&TrackQuery::default()).expect("query user db");
+            for t in tracks {
+                if t.duration.is_none() {
+                    if let Ok(info) = kanono_audio_engine::read_track(&t.path) {
+                        if let Some(dur) = info.duration {
+                            let _ = db.update_duration(t.id, dur);
+                        }
+                    }
+                }
+            }
+        }
     }
 }

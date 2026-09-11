@@ -62,7 +62,7 @@ impl SampleQueue {
         let mut count = 0usize;
         for sample in samples {
             count += 1;
-            if count % 512 == 0 && !should_continue() {
+            if count.is_multiple_of(512) && !should_continue() {
                 return false;
             }
             while self.0.push(sample).is_err() {

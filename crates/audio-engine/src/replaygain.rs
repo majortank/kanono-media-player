@@ -63,7 +63,7 @@ pub fn analyze_and_tag(path: impl AsRef<Path>) -> Result<ReplayGainResult> {
 
 /// Calculates BS.1770 K-weighted, gated integrated loudness and true peak.
 pub fn calculate_replaygain(samples: &[f32], channels: u16, sample_rate: u32) -> Result<ReplayGainResult> {
-    if channels == 0 || samples.is_empty() || samples.len() % usize::from(channels) != 0 {
+    if channels == 0 || samples.is_empty() || !samples.len().is_multiple_of(usize::from(channels)) {
         bail!("PCM must contain complete interleaved frames");
     }
     let mut analyzer = EbuR128::new(u32::from(channels), sample_rate, Mode::I | Mode::SAMPLE_PEAK)?;

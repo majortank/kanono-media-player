@@ -143,7 +143,7 @@ pub fn decode_track(path: impl AsRef<Path>) -> Result<DecodedTrack> {
         let channels = track.codec_params.channels.map(|c| c.count() as u16).unwrap_or(0);
         let duration = if let (Some(time_base), Some(frames)) = (track.codec_params.time_base, track.codec_params.n_frames) {
             let dur = time_base.calc_time(frames);
-            let secs = dur.seconds as f64 + f64::from(dur.frac);
+            let secs = dur.seconds as f64 + dur.frac;
             if secs > 0.0 {
                 Some(Duration::from_secs_f64(secs))
             } else {

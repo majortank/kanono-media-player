@@ -19,6 +19,9 @@ pub fn kanono_create_plugin() -> *mut dyn Plugin {
     Box::into_raw(Box::new(ExampleComponent))
 }
 
+/// # Safety
+///
+/// `plugin` must be a valid pointer obtained from `kanono_create_plugin` that has not been previously freed.
 #[no_mangle]
 pub unsafe fn kanono_destroy_plugin(plugin: *mut dyn Plugin) {
     drop(Box::from_raw(plugin));
