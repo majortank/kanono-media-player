@@ -16,7 +16,7 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, Sender};
-use iced::{executor, time, Application, Command, Element, Subscription, Theme};
+use iced::{executor, time, widget::pane_grid, Application, Command, Element, Subscription, Theme};
 use kanono_audio_engine::{
     decode_track_streaming, playback_state_channel, AudioOutput, LibraryDatabase, LibraryTrack,
     PlaybackStateReceiver, PlaybackStateSender, PlaybackUpdate, ReplayGainEvent, ReplayGainResult,
@@ -24,7 +24,7 @@ use kanono_audio_engine::{
 };
 use mpris::{MprisCommand, MprisService, MprisState};
 use plugins::PluginRegistry;
-use ui::{player_view, ViewProps};
+use ui::{player_view, PlayerPane, ViewProps};
 
 fn main() -> iced::Result {
     let mut settings = iced::Settings::default();
@@ -222,6 +222,7 @@ pub struct KanonoApp {
     mpris_commands: crossbeam_channel::Receiver<MprisCommand>,
     mpris_state: MprisState,
     components: PluginRegistry,
+    panes: pane_grid::State<PlayerPane>,
     library: Option<LibraryDatabase>,
     all_tracks: Vec<LibraryTrack>,
     visible_tracks: Vec<LibraryTrack>,
@@ -267,6 +268,7 @@ pub enum Message {
     PollPlayback,
     PollMpris,
     PollReplayGain,
+    SidebarResized(pane_grid::ResizeEvent),
     ImportFolder,
     FolderPicked(Option<PathBuf>),
     ImportFiles,
@@ -350,6 +352,10 @@ impl Application for KanonoApp {
         let all_tracks = library.query(&TrackQuery::default()).unwrap_or_default();
         let replaygain_worker = Arc::new(ReplayGainWorker::spawn());
         let (decode_tx, decode_rx) = crossbeam_channel::unbounded();
+        let (mut panes, sidebar_pane) = pane_grid::State::new(PlayerPane::Sidebar);
+        if let Some((_, split)) = panes.split(pane_grid::Axis::Vertical, sidebar_pane, PlayerPane::Main) {
+            panes.resize(split, 0.24);
+        }
         let mut app = Self {
             playback: PlaybackViewState::default(),
             playback_sender,
@@ -359,6 +365,7 @@ impl Application for KanonoApp {
             mpris_commands: mpris.commands,
             mpris_state: mpris.state,
             components,
+            panes,
             library: Some(library),
             visible_tracks: all_tracks.clone(),
             all_tracks,
@@ -410,6 +417,7 @@ impl Application for KanonoApp {
 
     fn update(&mut self, message: Message) -> Command<Message> {
         match message {
+            Message::SidebarResized(event) => self.panes.resize(event.split, event.ratio),
             Message::PollPlayback => {
                 while let Ok(event) = self.decode_rx.try_recv() {
                     self.handle_decode_event(event);
@@ -911,7 +919,7 @@ impl Application for KanonoApp {
                 .and_then(|t| self.track_gains.get(&t.path).copied()),
             editing_track: self.editing_track.as_ref(),
             components: self.components.plugins(),
-        })
+        }, &self.panes)
     }
 
     fn subscription(&self) -> Subscription<Message> {

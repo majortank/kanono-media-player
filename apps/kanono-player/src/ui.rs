@@ -5,7 +5,7 @@ use std::{
 };
 
 use iced::{
-    widget::{button, column, container, horizontal_space, row, scrollable, slider, svg, text, text_input},
+    widget::{button, column, container, horizontal_space, pane_grid, row, scrollable, slider, svg, text, text_input},
     Alignment, Color, Element, Length,
 };
 use kanono_audio_engine::{LibraryTrack, ReplayGainResult, TrackMetadata};
@@ -74,7 +74,13 @@ pub struct ViewProps<'a> {
     pub components: &'a [RegisteredPlugin],
 }
 
-pub fn player_view<'a>(props: ViewProps<'a>) -> Element<'a, Message> {
+#[derive(Debug, Clone, Copy)]
+pub enum PlayerPane {
+    Sidebar,
+    Main,
+}
+
+pub fn player_view<'a>(props: ViewProps<'a>, panes: &'a pane_grid::State<PlayerPane>) -> Element<'a, Message> {
     // --- TOP BAR ---
     let logo_icon = svg(svg::Handle::from_memory(LOGO_SVG))
         .width(Length::Fixed(28.0))
@@ -148,18 +154,17 @@ pub fn player_view<'a>(props: ViewProps<'a>) -> Element<'a, Message> {
         .width(Length::Fill)
         .style(panel_container_style());
 
-    // --- LEFT SIDEBAR ---
-    let sidebar = render_sidebar(&props);
-
-    // --- MAIN CONTENT ---
-    let main_content = match props.current_tab {
-        NavTab::Library | NavTab::Folders | NavTab::MostPlayed => render_track_list(&props),
-        NavTab::Queue => render_queue_list(&props),
-        NavTab::Info => render_info_view(&props),
-    };
-
-    let middle = row![sidebar, main_content]
-        .spacing(12)
+    let middle = pane_grid::PaneGrid::new(panes, |_, pane, _| {
+        pane_grid::Content::new(match pane {
+            PlayerPane::Sidebar => render_sidebar(&props),
+            PlayerPane::Main => match props.current_tab {
+                NavTab::Library | NavTab::Folders | NavTab::MostPlayed => render_track_list(&props),
+                NavTab::Queue => render_queue_list(&props),
+                NavTab::Info => render_info_view(&props),
+            },
+        })
+    })
+        .on_resize(12, Message::SidebarResized)
         .width(Length::Fill)
         .height(Length::Fill);
 
@@ -515,9 +520,12 @@ fn render_sidebar<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
         }
     }
 
-    container(scrollable(sidebar_content).height(Length::Fill))
+    container(
+        scrollable(container(sidebar_content).padding([0, 8]))
+            .height(Length::Fill),
+    )
         .padding(12)
-        .width(Length::Fixed(240.0))
+        .width(Length::Fill)
         .height(Length::Fill)
         .style(panel_container_style())
         .into()
