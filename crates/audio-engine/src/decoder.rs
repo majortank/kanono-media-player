@@ -75,6 +75,23 @@ pub fn decode_file(path: impl AsRef<Path>) -> Result<Vec<f32>> {
 
 /// Parses file metadata and decodes its samples before the track is eligible for playback.
 pub fn decode_track(path: impl AsRef<Path>) -> Result<DecodedTrack> {
+    decode_track_streaming(path, 0, 0, || true, |_| {})
+}
+
+/// Decodes an audio file in chunks, streaming resampled PCM samples directly to a callback.
+/// This enables zero-latency playback startup: the first audio buffer is pushed immediately
+/// while the remaining audio streams concurrently in the background.
+pub fn decode_track_streaming<F, C>(
+    path: impl AsRef<Path>,
+    target_sample_rate: u32,
+    target_channels: u16,
+    mut should_continue: C,
+    mut on_pcm_chunk: F,
+) -> Result<DecodedTrack>
+where
+    C: FnMut() -> bool,
+    F: FnMut(&[f32]),
+{
     let path = path.as_ref();
     let source = File::open(path).with_context(|| format!("unable to open {}", path.display()))?;
     let stream = MediaSourceStream::new(Box::new(source), Default::default());
@@ -158,7 +175,105 @@ pub fn decode_track(path: impl AsRef<Path>) -> Result<DecodedTrack> {
         metadata.duration = duration;
     }
     let is_opus = track_codec_params.codec == CODEC_TYPE_OPUS;
-    let mut samples = Vec::new();
+
+    let do_streaming = target_sample_rate > 0 && target_channels > 0;
+    let dst_rate = if do_streaming { target_sample_rate } else { sample_rate.max(1) };
+    let dst_channels = if do_streaming { target_channels } else { channels.max(1) };
+    let dst_ch = dst_channels as usize;
+
+    let mut resample_carry: Vec<f32> = Vec::new();
+    let mut frac_pos = 0.0f64;
+    let mut all_samples: Vec<f32> = Vec::new();
+    let mut chunk_buf: Vec<f32> = Vec::new();
+
+    let mut flush_chunk = |chunk: &[f32], src_rate: u32, src_channels: u16, is_eof: bool| {
+        if chunk.is_empty() && !is_eof {
+            return;
+        }
+        if !do_streaming {
+            all_samples.extend_from_slice(chunk);
+            return;
+        }
+
+        // 1. Remap channels
+        let remapped = if src_channels == dst_channels {
+            chunk.to_vec()
+        } else if src_channels == 1 && dst_channels == 2 {
+            let mut out = Vec::with_capacity(chunk.len() * 2);
+            for &s in chunk {
+                out.push(s);
+                out.push(s);
+            }
+            out
+        } else if src_channels == 2 && dst_channels == 1 {
+            let mut out = Vec::with_capacity(chunk.len() / 2);
+            for c in chunk.chunks(2) {
+                let s = if c.len() == 2 { (c[0] + c[1]) * 0.5 } else { c[0] };
+                out.push(s);
+            }
+            out
+        } else {
+            let src_ch = usize::from(src_channels).max(1);
+            let mut out = Vec::with_capacity((chunk.len() / src_ch) * dst_ch);
+            for frame in chunk.chunks(src_ch) {
+                let avg: f32 = frame.iter().sum::<f32>() / frame.len() as f32;
+                for _ in 0..dst_channels {
+                    out.push(avg);
+                }
+            }
+            out
+        };
+
+        // 2. Resample
+        if src_rate == dst_rate || src_rate == 0 {
+            on_pcm_chunk(&remapped);
+            all_samples.extend_from_slice(&remapped);
+        } else {
+            let mut input = std::mem::take(&mut resample_carry);
+            input.extend_from_slice(&remapped);
+
+            if is_eof && !input.is_empty() {
+                let last_start = input.len().saturating_sub(dst_ch);
+                let last_frame = input[last_start..].to_vec();
+                input.extend_from_slice(&last_frame);
+            }
+
+            let total_frames = input.len() / dst_ch;
+            let step = src_rate as f64 / dst_rate as f64;
+
+            if total_frames > 1 {
+                let mut resampled = Vec::with_capacity((total_frames as f64 / step) as usize * dst_ch);
+                let mut current_pos = frac_pos;
+
+                while (current_pos.floor() as usize + 1) < total_frames {
+                    let idx0 = current_pos.floor() as usize;
+                    let idx1 = idx0 + 1;
+                    let frac = (current_pos - idx0 as f64) as f32;
+
+                    for c in 0..dst_ch {
+                        let s0 = input[idx0 * dst_ch + c];
+                        let s1 = input[idx1 * dst_ch + c];
+                        resampled.push(s0 + frac * (s1 - s0));
+                    }
+                    current_pos += step;
+                }
+
+                let consumed_frames = current_pos.floor() as usize;
+                frac_pos = current_pos - consumed_frames as f64;
+                if !is_eof {
+                    let consumed_samples = (consumed_frames * dst_ch).min(input.len());
+                    resample_carry = input[consumed_samples..].to_vec();
+                }
+
+                if !resampled.is_empty() {
+                    on_pcm_chunk(&resampled);
+                    all_samples.extend_from_slice(&resampled);
+                }
+            } else if !is_eof {
+                resample_carry = input;
+            }
+        }
+    };
 
     if is_opus {
         let opus_rate = match sample_rate {
@@ -172,8 +287,12 @@ pub fn decode_track(path: impl AsRef<Path>) -> Result<DecodedTrack> {
         channels = opus_channels as u16;
 
         let mut pcm_buf = vec![0.0f32; 5760 * opus_channels];
+        let mut is_first = true;
 
         loop {
+            if !should_continue() {
+                break;
+            }
             let packet = match format.next_packet() {
                 Ok(packet) => packet,
                 Err(Error::IoError(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
@@ -184,13 +303,29 @@ pub fn decode_track(path: impl AsRef<Path>) -> Result<DecodedTrack> {
             }
             if let Ok(decoded_frames) = opus_decoder.decode_float(&packet.data, &mut pcm_buf) {
                 let count = decoded_frames * opus_channels;
-                samples.extend_from_slice(&pcm_buf[..count]);
+                chunk_buf.extend_from_slice(&pcm_buf[..count]);
+
+                let threshold = if is_first { 1024 } else { 4096 };
+                if chunk_buf.len() >= threshold * opus_channels {
+                    is_first = false;
+                    flush_chunk(&chunk_buf, sample_rate, channels, false);
+                    chunk_buf.clear();
+                }
             }
+        }
+        if !chunk_buf.is_empty() {
+            flush_chunk(&chunk_buf, sample_rate, channels, true);
+        } else {
+            flush_chunk(&[], sample_rate, channels, true);
         }
     } else {
         let mut decoder = symphonia::default::get_codecs().make(&track_codec_params, &Default::default())?;
+        let mut is_first = true;
 
         loop {
+            if !should_continue() {
+                break;
+            }
             let packet = match format.next_packet() {
                 Ok(packet) => packet,
                 Err(Error::IoError(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
@@ -207,11 +342,25 @@ pub fn decode_track(path: impl AsRef<Path>) -> Result<DecodedTrack> {
                     if sample_rate == 0 {
                         sample_rate = decoded.spec().rate;
                     }
-                    append_f32(&mut samples, decoded);
+                    append_f32(&mut chunk_buf, decoded);
+
+                    let ch_count = usize::from(channels).max(1);
+                    let threshold = if is_first { 1024 } else { 4096 };
+                    if chunk_buf.len() >= threshold * ch_count {
+                        is_first = false;
+                        flush_chunk(&chunk_buf, sample_rate, channels, false);
+                        chunk_buf.clear();
+                    }
                 }
                 Err(Error::DecodeError(_)) => continue,
                 Err(error) => return Err(error.into()),
             }
+        }
+
+        if !chunk_buf.is_empty() {
+            flush_chunk(&chunk_buf, sample_rate, channels, true);
+        } else {
+            flush_chunk(&[], sample_rate, channels, true);
         }
 
         if channels == 0 {
@@ -222,12 +371,19 @@ pub fn decode_track(path: impl AsRef<Path>) -> Result<DecodedTrack> {
         }
     }
 
-    if metadata.duration.is_none() && sample_rate > 0 && channels > 0 && !samples.is_empty() {
-        let total_frames = samples.len() / usize::from(channels);
-        metadata.duration = Some(Duration::from_secs_f64(total_frames as f64 / f64::from(sample_rate)));
+    let final_rate = if do_streaming { target_sample_rate } else { sample_rate };
+    let final_channels = if do_streaming { target_channels } else { channels };
+    if metadata.duration.is_none() && final_rate > 0 && final_channels > 0 && !all_samples.is_empty() {
+        let total_frames = all_samples.len() / usize::from(final_channels);
+        metadata.duration = Some(Duration::from_secs_f64(total_frames as f64 / f64::from(final_rate)));
     }
 
-    Ok(DecodedTrack { metadata, samples, sample_rate, channels })
+    Ok(DecodedTrack {
+        metadata,
+        samples: all_samples,
+        sample_rate: final_rate,
+        channels: final_channels,
+    })
 }
 
 /// Publishes fixed-size PCM windows while decoding on a non-real-time worker.
@@ -418,6 +574,45 @@ mod tests {
                 let rg = crate::replaygain::analyze_and_tag(&path).unwrap_or_else(|e| panic!("ReplayGain failed on {}: {e}", path.display()));
                 assert!(rg.integrated_lufs.is_finite());
             }
+        }
+    }
+
+    #[test]
+    fn test_streaming_decode() {
+        use std::path::PathBuf;
+        let p = PathBuf::from("/tmp/kanono_demo_music/01 - Kanono Groove.wav");
+        if p.exists() {
+            let mut chunk_count = 0;
+            let mut total_chunk_samples = 0;
+            let decoded = decode_track_streaming(
+                &p,
+                48000,
+                2,
+                || true,
+                |chunk| {
+                    chunk_count += 1;
+                    total_chunk_samples += chunk.len();
+                },
+            ).expect("streaming decode should succeed");
+
+            assert!(chunk_count > 1, "Should emit multiple chunks during streaming");
+            assert_eq!(total_chunk_samples, decoded.samples.len());
+            assert_eq!(decoded.sample_rate, 48000);
+            assert_eq!(decoded.channels, 2);
+
+            // Test cancellation aborts early
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            let aborted_chunks = AtomicUsize::new(0);
+            let _ = decode_track_streaming(
+                &p,
+                48000,
+                2,
+                || aborted_chunks.load(Ordering::SeqCst) < 2,
+                |_chunk| {
+                    aborted_chunks.fetch_add(1, Ordering::SeqCst);
+                },
+            );
+            assert!(aborted_chunks.load(Ordering::SeqCst) <= 3, "Cancellation must stop decoding early");
         }
     }
 }

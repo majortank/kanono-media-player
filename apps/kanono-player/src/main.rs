@@ -18,9 +18,9 @@ use std::{
 use crossbeam_channel::{Receiver, Sender};
 use iced::{executor, time, Application, Command, Element, Subscription, Theme};
 use kanono_audio_engine::{
-    decode_track, playback_state_channel, resample_and_remap_channels, AudioOutput,
-    LibraryDatabase, LibraryTrack, PlaybackStateReceiver, PlaybackStateSender, PlaybackUpdate,
-    ReplayGainEvent, ReplayGainResult, ReplayGainWorker, TagUpdate, TrackMetadata, TrackQuery,
+    decode_track_streaming, playback_state_channel, AudioOutput, LibraryDatabase, LibraryTrack,
+    PlaybackStateReceiver, PlaybackStateSender, PlaybackUpdate, ReplayGainEvent, ReplayGainResult,
+    ReplayGainWorker, TagUpdate, TrackMetadata, TrackQuery,
 };
 use mpris::{MprisCommand, MprisService, MprisState};
 use plugins::PluginRegistry;
@@ -201,7 +201,6 @@ enum DecodeEvent {
     TrackReady {
         generation: u64,
         track_id: i64,
-        metadata: TrackMetadata,
         samples: Arc<Vec<f32>>,
         exact_duration: Duration,
     },
@@ -223,6 +222,7 @@ pub struct KanonoApp {
     mpris_commands: crossbeam_channel::Receiver<MprisCommand>,
     mpris_state: MprisState,
     components: PluginRegistry,
+    library: Option<LibraryDatabase>,
     all_tracks: Vec<LibraryTrack>,
     visible_tracks: Vec<LibraryTrack>,
     selected_folder: Option<PathBuf>,
@@ -359,6 +359,7 @@ impl Application for KanonoApp {
             mpris_commands: mpris.commands,
             mpris_state: mpris.state,
             components,
+            library: Some(library),
             visible_tracks: all_tracks.clone(),
             all_tracks,
             selected_folder: None,
@@ -674,8 +675,7 @@ impl Application for KanonoApp {
                         year: if self.batch_edit.apply_year { self.batch_edit.year.trim().parse::<i32>().ok() } else { None },
                         bpm: if self.batch_edit.apply_bpm { self.batch_edit.bpm.trim().parse::<u32>().ok() } else { None },
                     };
-                    let db_path = library_database_path();
-                    if let Ok(mut db) = LibraryDatabase::open(db_path) {
+                    if let Some(db) = &mut self.library {
                         let _ = db.mass_tag(&track_ids, &update);
                         if let Ok(tracks) = db.query(&TrackQuery::default()) {
                             self.all_tracks = tracks;
@@ -833,8 +833,7 @@ impl Application for KanonoApp {
                         year: year_parsed,
                         bpm: bpm_parsed,
                     };
-                    let db_path = library_database_path();
-                    if let Ok(mut db) = LibraryDatabase::open(db_path) {
+                    if let Some(db) = &mut self.library {
                         let _ = db.mass_tag(&[editing.track_id], &update);
                         if let Ok(tracks) = db.query(&TrackQuery::default()) {
                             self.all_tracks = tracks;
@@ -1067,49 +1066,26 @@ impl KanonoApp {
             DecodeEvent::TrackReady {
                 generation,
                 track_id,
-                metadata,
                 samples,
                 exact_duration,
             } => {
                 if self.playback_generation.load(Ordering::SeqCst) != generation {
                     return;
                 }
-                self.playback.metadata = metadata;
-                self.playback.metadata.duration = Some(exact_duration);
                 if let Some(t) = self.all_tracks.iter_mut().find(|t| t.id == track_id) {
                     t.duration = Some(exact_duration);
                 }
                 if let Some(t) = self.visible_tracks.iter_mut().find(|t| t.id == track_id) {
                     t.duration = Some(exact_duration);
                 }
-                let db_path = library_database_path();
-                if let Ok(mut db) = LibraryDatabase::open(db_path) {
+                if let Some(db) = &mut self.library {
                     let _ = db.update_duration(track_id, exact_duration);
                 }
                 self.current_track_samples = Some(Arc::clone(&samples));
-                self.current_playing_track_id = Some(track_id);
-                self.selected_track = Some(track_id);
-                self.playback.elapsed = Duration::ZERO;
-                self.is_playing = true;
+                self.playback.metadata.duration = Some(exact_duration);
                 self.mpris_state.set_metadata(self.playback.metadata.clone());
-                self.mpris_state.set_playing(true);
                 self.playback_sender.publish_track(self.playback.metadata.clone());
 
-                if let Some(output) = &self.audio_output {
-                    output.queue.clear();
-                    self.playback_receiver.clear();
-                    output.reset_position();
-                    let _ = output.play();
-
-                    let queue = output.queue.clone();
-                    let pb_gen = Arc::clone(&self.playback_generation);
-                    let samples_arc = Arc::clone(&samples);
-                    thread::spawn(move || {
-                        queue.push_interleaved_cancellable(samples_arc.iter().copied(), || {
-                            pb_gen.load(Ordering::SeqCst) == generation
-                        });
-                    });
-                }
                 self.maybe_preload_next_track();
             }
             DecodeEvent::PreloadReady {
@@ -1125,8 +1101,7 @@ impl KanonoApp {
                 if let Some(t) = self.visible_tracks.iter_mut().find(|t| t.id == track_id) {
                     t.duration = Some(exact_duration);
                 }
-                let db_path = library_database_path();
-                if let Ok(mut db) = LibraryDatabase::open(db_path) {
+                if let Some(db) = &mut self.library {
                     let _ = db.update_duration(track_id, exact_duration);
                 }
                 if self.current_playing_track_id == for_playing_id {
@@ -1171,21 +1146,14 @@ impl KanonoApp {
         let current_playing_id = self.current_playing_track_id;
 
         thread::spawn(move || {
-            if let Ok(track) = decode_track(&next_path) {
-                let resampled = resample_and_remap_channels(
-                    &track.samples,
-                    track.sample_rate,
-                    track.channels,
-                    target_rate,
-                    target_channels,
-                );
-                let exact_frames = resampled.len() / usize::from(target_channels).max(1);
+            if let Ok(track) = decode_track_streaming(&next_path, target_rate, target_channels, || true, |_| {}) {
+                let exact_frames = track.samples.len() / usize::from(target_channels).max(1);
                 let exact_dur = Duration::from_secs_f64(exact_frames as f64 / f64::from(target_rate));
                 let _ = tx.send(DecodeEvent::PreloadReady {
                     for_playing_id: current_playing_id,
                     track_id: next_id,
                     metadata: next_meta,
-                    samples: Arc::new(resampled),
+                    samples: Arc::new(track.samples),
                     exact_duration: exact_dur,
                 });
             }
@@ -1233,23 +1201,8 @@ impl KanonoApp {
 
         if self.is_playing {
             // Check for play counting (>= 10s playback counts as a play)
-            if !self.played_tracked_for_current {
-                if let Some(curr_id) = self.current_playing_track_id {
-                    if self.playback.elapsed >= Duration::from_secs(10) {
-                        self.played_tracked_for_current = true;
-                        let db_path = library_database_path();
-                        if let Ok(mut db) = LibraryDatabase::open(db_path) {
-                            if let Ok(new_count) = db.record_play(curr_id) {
-                                if let Some(t) = self.all_tracks.iter_mut().find(|t| t.id == curr_id) {
-                                    t.play_count = new_count;
-                                }
-                                if let Some(t) = self.visible_tracks.iter_mut().find(|t| t.id == curr_id) {
-                                    t.play_count = new_count;
-                                }
-                            }
-                        }
-                    }
-                }
+            if self.playback.elapsed >= Duration::from_secs(10) {
+                self.record_current_track_play();
             }
 
             if let (Some(output), Some(samples)) = (&self.audio_output, &self.current_track_samples) {
@@ -1265,43 +1218,31 @@ impl KanonoApp {
                 );
 
                 if track_finished {
-                    if !self.played_tracked_for_current {
-                        if let Some(curr_id) = self.current_playing_track_id {
-                            self.played_tracked_for_current = true;
-                            let db_path = library_database_path();
-                            if let Ok(mut db) = LibraryDatabase::open(db_path) {
-                                if let Ok(new_count) = db.record_play(curr_id) {
-                                    if let Some(t) = self.all_tracks.iter_mut().find(|t| t.id == curr_id) {
-                                        t.play_count = new_count;
-                                    }
-                                    if let Some(t) = self.visible_tracks.iter_mut().find(|t| t.id == curr_id) {
-                                        t.play_count = new_count;
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    self.record_current_track_play();
                     self.play_next();
                 }
             } else if let Some(dur) = self.playback.metadata.duration {
                 if dur.as_secs() > 0 && self.playback.elapsed >= dur {
-                    if !self.played_tracked_for_current {
-                        if let Some(curr_id) = self.current_playing_track_id {
-                            self.played_tracked_for_current = true;
-                            let db_path = library_database_path();
-                            if let Ok(mut db) = LibraryDatabase::open(db_path) {
-                                if let Ok(new_count) = db.record_play(curr_id) {
-                                    if let Some(t) = self.all_tracks.iter_mut().find(|t| t.id == curr_id) {
-                                        t.play_count = new_count;
-                                    }
-                                    if let Some(t) = self.visible_tracks.iter_mut().find(|t| t.id == curr_id) {
-                                        t.play_count = new_count;
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    self.record_current_track_play();
                     self.play_next();
+                }
+            }
+        }
+    }
+
+    fn record_current_track_play(&mut self) {
+        if self.played_tracked_for_current {
+            return;
+        }
+        let Some(curr_id) = self.current_playing_track_id else { return };
+        self.played_tracked_for_current = true;
+        if let Some(db) = &mut self.library {
+            if let Ok(new_count) = db.record_play(curr_id) {
+                if let Some(t) = self.all_tracks.iter_mut().find(|t| t.id == curr_id) {
+                    t.play_count = new_count;
+                }
+                if let Some(t) = self.visible_tracks.iter_mut().find(|t| t.id == curr_id) {
+                    t.play_count = new_count;
                 }
             }
         }
@@ -1412,9 +1353,6 @@ impl KanonoApp {
         }
 
         self.apply_volume();
-        if !self.track_gains.contains_key(&path) {
-            let _ = self.replaygain_worker.enqueue(path.clone());
-        }
 
         // Check if this track was already preloaded in memory
         if let Some(preloaded) = self.preloaded_track.take() {
@@ -1444,7 +1382,7 @@ impl KanonoApp {
             }
         }
 
-        // Invalidate previous workers and decode in background thread
+        // Invalidate previous workers and stream-decode in background thread
         self.preloaded_track = None;
         self.current_track_samples = None;
         let generation = self.playback_generation.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1459,33 +1397,38 @@ impl KanonoApp {
             let target_rate = output.config.sample_rate.0;
             let target_channels = output.config.channels;
             let tx = self.decode_tx.clone();
+            let queue = output.queue.clone();
 
             thread::spawn(move || {
                 if pb_gen.load(Ordering::SeqCst) != generation {
                     return;
                 }
-                match decode_track(&path) {
+                let check_gen = Arc::clone(&pb_gen);
+                let push_gen = Arc::clone(&pb_gen);
+                let queue_clone = queue.clone();
+
+                match decode_track_streaming(
+                    &path,
+                    target_rate,
+                    target_channels,
+                    move || check_gen.load(Ordering::SeqCst) == generation,
+                    move |chunk| {
+                        let push_check = Arc::clone(&push_gen);
+                        queue_clone.push_interleaved_cancellable(chunk.iter().copied(), move || {
+                            push_check.load(Ordering::SeqCst) == generation
+                        });
+                    },
+                ) {
                     Ok(track) => {
                         if pb_gen.load(Ordering::SeqCst) != generation {
                             return;
                         }
-                        let resampled = resample_and_remap_channels(
-                            &track.samples,
-                            track.sample_rate,
-                            track.channels,
-                            target_rate,
-                            target_channels,
-                        );
-                        if pb_gen.load(Ordering::SeqCst) != generation {
-                            return;
-                        }
-                        let exact_frames = resampled.len() / usize::from(target_channels).max(1);
+                        let exact_frames = track.samples.len() / usize::from(target_channels).max(1);
                         let exact_dur = Duration::from_secs_f64(exact_frames as f64 / f64::from(target_rate));
                         let _ = tx.send(DecodeEvent::TrackReady {
                             generation,
                             track_id,
-                            metadata,
-                            samples: Arc::new(resampled),
+                            samples: Arc::new(track.samples),
                             exact_duration: exact_dur,
                         });
                     }
