@@ -8,10 +8,12 @@
   [![Rust: 1.75+](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
   [![GUI: Iced 0.12](https://img.shields.io/badge/GUI-Iced%200.12-teal.svg)](https://github.com/iced-rs/iced)
   [![Audio: CPAL + Symphonia](https://img.shields.io/badge/Audio-CPAL%20%2B%20Symphonia-purple.svg)](https://github.com/pdeljanov/Symphonia)
-  [![Platform: Linux / Windows / macOS](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20%7C%20macOS-green.svg)](#installation--getting-started)
+  [![Platform: Linux / Windows / macOS](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20%7C%20macOS-green.svg)](#downloads)
+  [![Latest Release](https://img.shields.io/github/v/release/majortank/kanono-media-player?color=success&label=release)](https://github.com/majortank/kanono-media-player/releases/latest)
 </div>
 
 <p align="center">
+  <a href="#downloads"><strong>Downloads</strong></a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#screenshots">Screenshots</a> ·
   <a href="#features">Features</a> ·
@@ -22,6 +24,20 @@
 <p align="center">
   <img src="assets/demo/demo.png" alt="Kanono Media Player playback view" width="100%" />
 </p>
+
+## Downloads
+
+Download precompiled standalone binaries and installers for your operating system:
+
+| Platform | Package | Architecture | Direct Download |
+| :--- | :--- | :--- | :--- |
+| **Windows** | Inno Setup Installer (`.exe`) | x64 (64-bit) | [**⬇️ Download for Windows (x64)**](https://github.com/majortank/kanono-media-player/releases/latest/download/kanono-media-player-windows-x64-setup.exe) |
+| **macOS** | Disk Image (`.dmg`) | Apple Silicon (`arm64` - M1/M2/M3/M4) | [**⬇️ Download for macOS (Apple Silicon)**](https://github.com/majortank/kanono-media-player/releases/latest/download/kanono-media-player-macos-arm64.dmg) |
+| **macOS** | Disk Image (`.dmg`) | Intel (`x64`) | [**⬇️ Download for macOS (Intel)**](https://github.com/majortank/kanono-media-player/releases/latest/download/kanono-media-player-macos-x64.dmg) |
+| **Linux** | Portable Archive (`.tar.gz`) | x86_64 | [**⬇️ Download for Linux (x64)**](https://github.com/majortank/kanono-media-player/releases/latest/download/kanono-media-player-linux-x64.tar.gz) |
+
+> [!TIP]
+> View all version tags, changelogs, and checksums on the [GitHub Releases page](https://github.com/majortank/kanono-media-player/releases).
 
 ## A Player Built Around Your Library
 
@@ -305,12 +321,13 @@ cargo flamegraph --profile profiling --bin kanono-player
 
 ## Release Packages
 
-Automated GitHub Actions workflows package the following native binaries on tagged releases:
+Automated GitHub Actions workflows package native binaries on every release. You can download them directly:
 
-- **Linux**: `kanono-media-player-linux-x64.tar.gz` (executable, desktop launcher, scalable hicolor icons under `/usr`).
-- **Windows**: `kanono-media-player-windows-x64-setup.exe` (Inno Setup installer with Start Menu shortcuts).
-- **macOS**: `kanono-media-player-macos-arm64.dmg` (Apple Silicon) and `kanono-media-player-macos-x64.dmg` (Intel).
-- **Arch Linux**: `PKGBUILD` included in repository root for AUR packaging.
+- **Windows**: [`kanono-media-player-windows-x64-setup.exe`](https://github.com/majortank/kanono-media-player/releases/latest/download/kanono-media-player-windows-x64-setup.exe) (Inno Setup installer with Start Menu & Desktop shortcuts).
+- **macOS (Apple Silicon)**: [`kanono-media-player-macos-arm64.dmg`](https://github.com/majortank/kanono-media-player/releases/latest/download/kanono-media-player-macos-arm64.dmg) (Apple Silicon M1/M2/M3/M4 disk image).
+- **macOS (Intel)**: [`kanono-media-player-macos-x64.dmg`](https://github.com/majortank/kanono-media-player/releases/latest/download/kanono-media-player-macos-x64.dmg) (Intel 64-bit disk image).
+- **Linux**: [`kanono-media-player-linux-x64.tar.gz`](https://github.com/majortank/kanono-media-player/releases/latest/download/kanono-media-player-linux-x64.tar.gz) (precompiled binary, `.desktop` launcher, and scalable icons).
+- **Arch Linux**: [PKGBUILD](PKGBUILD) included in repository root for AUR packaging.
 
 ---
 
