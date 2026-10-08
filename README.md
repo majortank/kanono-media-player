@@ -1,7 +1,8 @@
 <div align="center">
   <img src="assets/logo.svg" alt="Kanono Media Player Logo" width="120" />
   <h1>Kanono Media Player</h1>
-  <p><strong>A modular, ultra-responsive desktop audio player inspired by Foobar2000, built with Rust and Iced.</strong></p>
+  <p><strong>A fast, modular desktop music player for focused listening and deep library control.</strong></p>
+  <p>Built with Rust, Iced, CPAL, and Symphonia. Inspired by the speed and flexibility of Foobar2000.</p>
 
   [![License: MIT/Apache-2.0](https://img.shields.io/badge/License-MIT%20%2F%20Apache--2.0-blue.svg)](#license)
   [![Rust: 1.75+](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
@@ -10,105 +11,86 @@
   [![Platform: Linux / Windows / macOS](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20%7C%20macOS-green.svg)](#installation--getting-started)
 </div>
 
----
-
 <p align="center">
-  <img src="assets/demo/demo.png" alt="Kanono Media Player Interface" width="100%" />
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#screenshots">Screenshots</a> ·
+  <a href="#features">Features</a> ·
+  <a href="#installation--getting-started">Installation</a> ·
+  <a href="#plugin-development">Plugins</a>
 </p>
 
-## Overview
+<p align="center">
+  <img src="assets/demo/demo.png" alt="Kanono Media Player playback view" width="100%" />
+</p>
 
-**Kanono Media Player** is a lightweight, customizable desktop music player engineered for audiophiles, power users, and collectors. Inspired by the performance, modularity, and catalog control of classic **Foobar2000**, Kanono provides sample-accurate playback, instant library filtering across tens of thousands of tracks, real-time DSP tone sculpting, multiple curated color themes, and hot-swappable latency buffer tuning.
+## A Player Built Around Your Library
 
-Built entirely in **Rust** using **Iced 0.12**, **CPAL**, and **Symphonia**, Kanono ensures zero audio stutter by completely decoupling audio processing, metadata decoding, background library scanning, and GUI rendering onto dedicated asynchronous worker threads.
+Kanono is a lightweight, customizable player for audiophiles, power users, and collectors. Browse a large collection quickly, queue music without losing your place, tune the playback chain, and keep the desktop integration you expect.
 
----
+Audio processing, metadata decoding, library scanning, and GUI rendering run on dedicated asynchronous paths to keep the interface responsive during everyday playback and catalog work.
 
-## Key Features
+| Library-first workflow | Playback control | Desktop-ready |
+| --- | --- | --- |
+| Fast filtering, folder browsing, batch tagging, and SQLite-backed indexing | Gapless queueing, ReplayGain, DSP profiles, and a 28-band visualizer | MPRIS 2.0, media keys, theme cycling, and dynamic components |
 
-### 🎨 Dynamic Theme Engine (6 Curated Palettes)
-Switch aesthetics instantly without restarting the application:
-- **Emerald Dark (Default)**: Deep obsidian workspace (`#090d16`) with vivid emerald green accents (`#10b981`) and slate surfaces.
-- **Midnight Cyberpunk**: Deep abyss (`#0b0b14`) with electric magenta (`#d946ef`) and neon cyan highlights.
-- **Nordic Frost**: Minimalist polar slate (`#0e1726`) featuring crisp arctic cyan (`#06b6d4`) accents.
-- **Amber Sunset**: Warm twilight carbon (`#120e0a`) paired with glowing amber-gold accents (`#f59e0b`).
-- **Dracula**: Classic gothic purple darkness (`#1e1f29`) with lavender (`#bd93f9`) and soft pink accents.
-- **Solarized Light**: High-contrast, easy-on-the-eyes daylight theme (`#fdf6e3`) with solar teal highlights (`#2aa198`).
-- **Quick Cycle Button**: Switch themes directly from the top navigation bar with a single click.
-- **Interactive Gallery**: Browse visual cards and descriptions in the **Audio & System** control center.
+## Quick Start
 
-### 🎛️ Real-Time DSP Sound Coloration Profiles
-Shape your sound in-place with zero-latency audio thread filtering:
-- **Flat (Studio Reference)**: Bit-perfect, uncolored pass-through.
-- **Bass Boost (+4.5 dB)**: Low-end warmth and punch for subwoofers and bass-heavy tracks (< 150 Hz).
-- **Warm Vintage (Analog Tape)**: Softens harsh high frequencies (> 8.5 kHz) with warm, relaxed lower-mids.
-- **Vocal Clarity (+3.0 dB)**: Enhances vocal separation and lyrical presence (1 kHz – 3.5 kHz).
-- **Treble Air (+3.5 dB)**: Open, airy top-end sparkle for acoustic, classical, and orchestral recordings (> 10 kHz).
-- **Club Punch**: Dynamic club coloration combining deep bass reinforcement with boosted presence.
+```bash
+git clone https://github.com/majortank/kanono-media-player.git
+cd kanono-media-player
+cargo run -p kanono-player
+```
 
-### 🔊 Target Loudness Reference & ReplayGain
-- **EBU R128 & ITU-R BS.1770 Standards**: Integrated loudness and true-peak analysis computed on a dedicated background worker.
-- **Configurable Loudness Targets**:
-  - **-14 LUFS (Streaming Standard)**: Calibrated for Spotify, YouTube, and modern commercial masters.
-  - **-18 LUFS (Balanced Default)**: Dynamic audiophile master standard preserving transient response.
-  - **-23 LUFS (Broadcast Standard)**: Strict EBU R128 European television and radio broadcast compliance.
-- **Auto Gain Offsetting**: Smooth dynamic gain shifting when ReplayGain mode is toggled on.
+See [Installation](#installation--getting-started) for Linux dependencies, release builds, and PipeWire tuning.
 
-### ⚡ Audio Hardware Output & Latency Tuning
-- **Hardware Introspection**: Inspect your sound card, active host API (ALSA, PipeWire, PulseAudio), true sample rate, channel count, sample format, and driver buffer bounds.
-- **Hot-Swappable Latency Profiles**: Change audio buffer sizes on the fly without interrupting playback or losing position:
-  - **Adaptive (System Default)**: Lets PipeWire / ALSA automatically manage buffer sizing.
-  - **Low Latency (512 frames / ~11 ms)**: Snappy response for rapid seeking and live playback controls.
-  - **Balanced (1024 frames / ~23 ms)**: Optimal balance between low latency and CPU efficiency.
-  - **Safe Buffer (2048 frames / ~46 ms)**: Maximum protection against buffer underruns under heavy CPU loads.
-- **Diagnostics & Calibration Tools**:
-  - **Test Tone (440 Hz A4)**: Generates a soft-windowed sine chime to test hardware connectivity.
-  - **Stereo Channel Test (L / R)**: Plays an isolated chime on the Left channel followed by the Right channel to verify stereo imaging and physical speaker wiring.
+## Screenshots
 
-### 📁 High-Performance Music Library Manager
-- **Monitored Directory Tracking**: Register multiple directories; tracks are indexed into an ACID-compliant SQLite WAL database.
-- **Fast Asynchronous Scanning**: Non-blocking background worker processes hundreds of files per second with batch database inserts.
-- **Smart Rescanning**: Rescan individual folders or trigger a full catalog rescan with live progress reporting.
-- **Maintenance Tools**:
-  - **Clean Dead / Missing Songs**: Automatically prunes catalog entries for moved, renamed, or deleted files without re-indexing the whole library.
-  - **Reset Library Catalog**: Safely wipes database entries and folder paths with a confirmation prompt (files on disk are never touched).
-- **Catalog Statistics Overview**: Real-time summary cards displaying Total Tracks, Total Playtime, Unique Artists & Albums, and Total Plays.
+### Playback and Queue
 
-### 🏷️ Multi-Track Selection & Batch Tag Editor
-- **Multi-Selection**: Select tracks via checkboxes or click **Select All** on the current filtered view.
-- **Multi-Action Bar**: Play Selected, Add Selected to Queue (`+Q`), Batch Edit Tags, or Remove Selected from Library.
-- **Batch Tag Engine**: Apply Title, Artist, Album, Genre, Year, or BPM changes across dozens or hundreds of files simultaneously. Checkbox toggles ensure only intended fields are updated while preserving existing tags.
+<p align="center">
+  <img src="assets/demo/Main%20Kanono-Player%20Tab.png" alt="Kanono playback view with queue, library filters, and visualizer" width="100%" />
+</p>
 
-### 🔍 Hierarchical Directory Tree & Advanced Filtering
-- **Multi-Level Folder Tree**: Interactive nested directory explorer showing subfolder track counts, folder-level play buttons, and `+Q` queueing.
-- **8 Dynamic Filter Categories**:
-  - **Artists**, **Albums**, and **Genres** with track count badges.
-  - **Duration Filters**: `< 2m`, `2 – 4m`, `4 – 6m`, and `> 6m`.
-  - **Release Year**: Chronologically sorted from newest to oldest.
-  - **BPM Ranges**: `< 90 BPM (Chill)`, `90 – 120 BPM (Mid-Tempo)`, `120 – 140 BPM (Upbeat)`, and `> 140 BPM (High Energy)`.
-- **Most Played Playlist**: Automatic tracking of play counts with fire badges for frequently played favorites.
-- **Active Filter Summary**: Visual chip showing currently active filters with a 1-click **Clear** button.
+The main view keeps search, collection filters, the queue, transport controls, and the live spectrum within reach.
 
-### 🎵 Wide Audio & Video Codec Support
-Kanono decodes all major digital audio formats with support for video container audio tracks:
-- **Audio Codecs**: MP3 (ID3v1, ID3v2.3, ID3v2.4), FLAC, WAV, OGG Vorbis, AAC (ADTS & MP4-wrapped), M4A, Opus.
-- **Video Containers (Audio Extraction)**: Direct audio decoding from MP4 (AAC) and WebM (Opus / Vorbis) files.
-- **Metadata Sanitization**: Automatic stripping of null characters (`\0`) and corrupted byte sequences from Windows / legacy taggers, ensuring 100% crash-proof Wayland and X11 window title rendering.
+### Library Management
 
-### 🖥️ Native Desktop Integration & MPRIS 2.0
-- **D-Bus MPRIS 2.0**: Exposes `org.mpris.MediaPlayer2.kanono` on the user session bus for seamless integration with GNOME, KDE Plasma, XFCE, and lock screens.
-- **Media Keys**: Full support for Play/Pause, Next, Previous, Stop, Seek, and Volume control.
-- **Synchronized Metadata**: Real-time transmission of track title, artist, album, duration, and playback status to desktop widgets.
+<p align="center">
+  <img src="assets/demo/Kanono%20Library%20Manager.png" alt="Kanono library manager view" width="100%" />
+</p>
 
-### 🧩 Native Dynamic Plugin Architecture
-- **`.so` Hot-Loading**: Drop compiled shared libraries into the `components/` directory. Kanono detects, verifies, and loads external components on launch.
-- **Component Management**: Inspect loaded components and reload plugins without restarting via the **Audio & System** control center.
+Register music folders, monitor scans, review catalog statistics, and run maintenance from one workspace.
 
-### 📊 Real-Time 28-Band Audio Visualizer
-- **True RMS Metering**: Smooth, dynamic 28-band spectrum bar visualizer responding directly to output PCM data.
-- **Theme Integrated**: Color gradient transitions automatically adjust to match the active theme palette.
+### Audio and System
 
----
+<p align="center">
+  <img src="assets/demo/Kanono%20Audio%20%26%20System%20Setup.png" alt="Kanono audio and system settings view" width="100%" />
+</p>
+
+Configure output, latency, loudness, sound profiles, themes, and loaded components without leaving the player.
+
+## Features
+
+### Playback and Sound
+
+- **Format support:** MP3, FLAC, WAV, OGG Vorbis, AAC, M4A, Opus, MP4 audio, and WebM audio through Symphonia.
+- **DSP profiles:** Flat, Bass Boost, Warm Vintage, Vocal Clarity, Treble Air, and Club Punch.
+- **ReplayGain:** Background EBU R128 / ITU-R BS.1770 analysis with selectable -14, -18, and -23 LUFS targets.
+- **Visualizer:** Theme-aware, 28-band RMS spectrum metering driven from output PCM.
+- **Output controls:** Inspect the active device and host API, choose adaptive, low-latency, balanced, or safe buffers, and run stereo test tones.
+
+### Library and Queue
+
+- **SQLite-backed catalog:** Track multiple folders with asynchronous indexing, rescans, missing-file cleanup, and catalog reset tools.
+- **Flexible discovery:** Filter by artist, album, genre, duration, year, BPM, and folder hierarchy; surface frequently played tracks.
+- **Batch work:** Select multiple tracks to play, queue, remove, or update tags together.
+- **Responsive queueing:** Gapless queue management with low-water preloading.
+
+### Desktop and Customization
+
+- **Six curated themes:** Emerald Dark, Midnight Cyberpunk, Nordic Frost, Amber Sunset, Dracula, and Solarized Light.
+- **MPRIS 2.0:** Desktop widgets and media keys can control playback and receive synchronized metadata.
+- **Plugin host:** Load shared-library components from `components/` and manage them from the Audio & System view.
 
 ## Architecture Overview
 
