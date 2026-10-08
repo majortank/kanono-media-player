@@ -34,10 +34,19 @@ use plugins::PluginRegistry;
 use theme::PlayerTheme;
 use ui::{build_folder_tree, player_view, FolderTreeNode, PlayerPane, ViewProps};
 
+fn load_app_icon() -> Option<iced::window::Icon> {
+    const ICON_BYTES: &[u8] = include_bytes!("../../../assets/icons/kanono-player.png");
+    let img = image::load_from_memory(ICON_BYTES).ok()?;
+    let rgba = img.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    iced::window::icon::from_rgba(rgba.into_raw(), width, height).ok()
+}
+
 fn main() -> iced::Result {
     let mut settings = iced::Settings::default();
     settings.window.size = iced::Size::new(1060.0, 720.0);
     settings.window.min_size = Some(iced::Size::new(800.0, 560.0));
+    settings.window.icon = load_app_icon();
     KanonoApp::run(settings)
 }
 
@@ -395,7 +404,20 @@ impl Application for KanonoApp {
         };
         let components = PluginRegistry::load_components(component_directory());
         let mpris = MprisService::spawn();
-        let library = LibraryDatabase::open(library_database_path()).expect("failed to open music library database");
+        let db_path = library_database_path();
+        let library = match LibraryDatabase::open(&db_path) {
+            Ok(db) => db,
+            Err(err) => {
+                eprintln!(
+                    "warning: failed to open library database at {}: {err}. Falling back to temporary directory.",
+                    db_path.display()
+                );
+                let fallback_path = std::env::temp_dir()
+                    .join("kanono-media-player")
+                    .join("library.sqlite3");
+                LibraryDatabase::open(&fallback_path).expect("failed to open fallback music library database")
+            }
+        };
         let all_tracks = library.query(&TrackQuery::default()).unwrap_or_default();
         let raw_folders = library.get_raw_folders().unwrap_or_default();
         let library_folders: Vec<LibraryFolder> = raw_folders
@@ -1378,14 +1400,25 @@ fn component_directory() -> PathBuf {
     if let Some(dir) = std::env::var_os("KANONO_COMPONENTS_DIR") {
         return PathBuf::from(dir);
     }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let candidate = exe_dir.join("components");
+            if candidate.is_dir() {
+                return candidate;
+            }
+        }
+    }
     for candidate in ["components", "target/release", "target/debug"] {
         let p = PathBuf::from(candidate);
         if p.is_dir() {
             if let Ok(entries) = std::fs::read_dir(&p) {
-                let has_so = entries.filter_map(|e| e.ok()).any(|e| {
-                    e.path().extension().map(|ext| ext == "so").unwrap_or(false)
+                let has_plugin = entries.filter_map(|e| e.ok()).any(|e| {
+                    e.path()
+                        .extension()
+                        .map(|ext| ext == "so" || ext == "dll" || ext == "dylib")
+                        .unwrap_or(false)
                 });
-                if has_so {
+                if has_plugin {
                     return p;
                 }
             }
@@ -1394,12 +1427,55 @@ fn component_directory() -> PathBuf {
     PathBuf::from("components")
 }
 
-fn library_database_path() -> PathBuf {
+fn user_data_directory() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            return PathBuf::from(appdata).join("kanono-media-player");
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            return PathBuf::from(local).join("kanono-media-player");
+        }
+        if let Some(userprofile) = std::env::var_os("USERPROFILE") {
+            return PathBuf::from(userprofile)
+                .join("AppData")
+                .join("Roaming")
+                .join("kanono-media-player");
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join("kanono-media-player");
+        }
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
+            return PathBuf::from(xdg).join("kanono-media-player");
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join("kanono-media-player");
+        }
+    }
+
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("kanono-media-player/library.sqlite3")
+        .or_else(|| std::env::var_os("APPDATA").map(PathBuf::from))
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .or_else(|| std::env::var_os("USERPROFILE").map(|u| PathBuf::from(u).join("AppData/Roaming")))
+        .unwrap_or_else(std::env::temp_dir)
+        .join("kanono-media-player")
+}
+
+fn library_database_path() -> PathBuf {
+    user_data_directory().join("library.sqlite3")
 }
 
 impl KanonoApp {
