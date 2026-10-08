@@ -4,6 +4,7 @@ mod mpris;
 #[path = "mpris_stub.rs"]
 mod mpris;
 mod plugins;
+mod theme;
 mod ui;
 
 use std::{
@@ -22,12 +23,15 @@ use std::{
 use crossbeam_channel::{Receiver, Sender};
 use iced::{executor, time, widget::pane_grid, Application, Command, Element, Subscription, Theme};
 use kanono_audio_engine::{
-    compute_library_stats, decode_track_streaming, playback_state_channel, AudioOutput, LibraryDatabase, LibraryFolder,
-    LibraryStats, LibraryTrack, PlaybackStateReceiver, PlaybackStateSender, PlaybackUpdate,
-    ReplayGainEvent, ReplayGainResult, ReplayGainWorker, TagUpdate, TrackMetadata, TrackQuery,
+    compute_library_stats, decode_track_streaming, generate_stereo_channel_test, generate_test_tone,
+    get_audio_device_info, playback_state_channel, AudioDeviceInfo, AudioOutput, LatencyProfile,
+    LibraryDatabase, LibraryFolder, LibraryStats, LibraryTrack, PlaybackStateReceiver,
+    PlaybackStateSender, PlaybackUpdate, ReplayGainEvent, ReplayGainResult, ReplayGainWorker,
+    SoundProfile, TagUpdate, TargetLoudness, TrackMetadata, TrackQuery,
 };
 use mpris::{MprisCommand, MprisService, MprisState};
 use plugins::PluginRegistry;
+use theme::PlayerTheme;
 use ui::{build_folder_tree, player_view, FolderTreeNode, PlayerPane, ViewProps};
 
 fn main() -> iced::Result {
@@ -264,6 +268,12 @@ pub struct KanonoApp {
     folder_tree: Vec<FolderTreeNode>,
     is_scanning: bool,
     confirm_clear_library: bool,
+    current_theme: PlayerTheme,
+    sound_profile: SoundProfile,
+    target_loudness: TargetLoudness,
+    latency_profile: LatencyProfile,
+    audio_device_info: AudioDeviceInfo,
+    inspecting_track_id: Option<i64>,
 }
 
 #[derive(Default)]
@@ -351,6 +361,18 @@ pub enum Message {
     ConfirmClearLibrary,
     CancelClearLibrary,
     LibraryCleared(Result<(), String>),
+    // Theme Engine
+    SetTheme(PlayerTheme),
+    CycleTheme,
+    // Audio & System
+    SetSoundProfile(SoundProfile),
+    SetTargetLoudness(TargetLoudness),
+    SetLatencyProfile(LatencyProfile),
+    ResetAudioDevice,
+    PlayAudioTestTone,
+    PlayChannelTest,
+    InspectTrack(Option<i64>),
+    ReloadComponents,
 }
 
 impl Application for KanonoApp {
@@ -399,6 +421,7 @@ impl Application for KanonoApp {
         if let Some((_, split)) = panes.split(pane_grid::Axis::Vertical, sidebar_pane, PlayerPane::Main) {
             panes.resize(split, 0.24);
         }
+        let audio_device_info = get_audio_device_info();
         let mut app = Self {
             playback: PlaybackViewState::default(),
             playback_sender,
@@ -445,6 +468,12 @@ impl Application for KanonoApp {
             folder_tree,
             is_scanning: false,
             confirm_clear_library: false,
+            current_theme: PlayerTheme::default(),
+            sound_profile: SoundProfile::default(),
+            target_loudness: TargetLoudness::default(),
+            latency_profile: LatencyProfile::default(),
+            audio_device_info,
+            inspecting_track_id: None,
         };
         app.refresh_visible_tracks();
         (app, resolve_missing_durations())
@@ -468,7 +497,11 @@ impl Application for KanonoApp {
     }
 
     fn theme(&self) -> Self::Theme {
-        Theme::Dark
+        if self.current_theme.palette().is_dark {
+            Theme::Dark
+        } else {
+            Theme::Light
+        }
     }
 
     fn update(&mut self, message: Message) -> Command<Message> {
@@ -1051,11 +1084,77 @@ impl Application for KanonoApp {
                     }
                 }
             }
+            Message::SetTheme(theme) => {
+                self.current_theme = theme;
+                self.status_message = Some(format!("Theme changed to {}", theme.label()));
+            }
+            Message::CycleTheme => {
+                self.current_theme = self.current_theme.next();
+                self.status_message = Some(format!("Theme: {}", self.current_theme.label()));
+            }
+            Message::SetSoundProfile(profile) => {
+                self.sound_profile = profile;
+                if let Some(output) = &self.audio_output {
+                    output.set_sound_profile(profile);
+                }
+                self.status_message = Some(format!("DSP Sound Profile: {}", profile.label()));
+            }
+            Message::SetTargetLoudness(target) => {
+                self.target_loudness = target;
+                self.apply_volume();
+                self.status_message = Some(format!("Target Loudness set to {}", target.label()));
+            }
+            Message::SetLatencyProfile(profile) => {
+                self.latency_profile = profile;
+                self.reopen_audio_device(profile);
+                self.status_message = Some(format!("Latency buffer set to {}", profile.label()));
+            }
+            Message::ResetAudioDevice => {
+                self.reopen_audio_device(self.latency_profile);
+                self.audio_device_info = get_audio_device_info();
+                self.status_message = Some("Audio stream successfully re-initialized".to_string());
+            }
+            Message::PlayAudioTestTone => {
+                if let Some(out) = &self.audio_output {
+                    let tone = generate_test_tone(out.config.sample_rate.0, 1.5);
+                    if let Err(e) = out.play_test_buffer(tone) {
+                        eprintln!("failed to play test tone: {e}");
+                    } else {
+                        self.is_playing = true;
+                        self.status_message = Some("Playing 440 Hz Reference Chime Diagnostics".to_string());
+                    }
+                }
+            }
+            Message::PlayChannelTest => {
+                if let Some(out) = &self.audio_output {
+                    let test = generate_stereo_channel_test(out.config.sample_rate.0);
+                    if let Err(e) = out.play_test_buffer(test) {
+                        eprintln!("failed to play channel test: {e}");
+                    } else {
+                        self.is_playing = true;
+                        self.status_message = Some("Playing Stereo Channel Test (Left -> Right)".to_string());
+                    }
+                }
+            }
+            Message::InspectTrack(track_id) => {
+                self.inspecting_track_id = track_id;
+            }
+            Message::ReloadComponents => {
+                self.components = PluginRegistry::load_components(component_directory());
+                self.status_message = Some(format!("Reloaded {} dynamic components", self.components.plugins().len()));
+            }
         }
         Command::none()
     }
 
     fn view(&self) -> Element<'_, Message> {
+        let palette = self.current_theme.palette();
+        let inspecting_track = self
+            .inspecting_track_id
+            .or(self.current_playing_track_id)
+            .or(self.selected_track)
+            .and_then(|id| self.all_tracks.iter().find(|t| t.id == id));
+
         player_view(ViewProps {
             tracks: &self.visible_tracks,
             all_tracks: &self.all_tracks,
@@ -1092,6 +1191,13 @@ impl Application for KanonoApp {
             is_scanning: self.is_scanning,
             confirm_clear_library: self.confirm_clear_library,
             folder_tree: &self.folder_tree,
+            theme: self.current_theme,
+            palette,
+            sound_profile: self.sound_profile,
+            target_loudness: self.target_loudness,
+            latency_profile: self.latency_profile,
+            audio_device_info: &self.audio_device_info,
+            inspecting_track,
         }, &self.panes)
     }
 
@@ -1308,13 +1414,58 @@ impl KanonoApp {
                 if let Some(track_id) = self.current_playing_track_id {
                     if let Some(track) = self.all_tracks.iter().find(|t| t.id == track_id) {
                         if let Some(result) = self.track_gains.get(&track.path) {
-                            let factor = 10.0_f32.powf((result.gain_db as f32) / 20.0).clamp(0.25, 2.5);
+                            let target_offset = self.target_loudness.target_lufs() - (-18.0);
+                            let effective_gain_db = (result.gain_db + target_offset) as f32;
+                            let factor = 10.0_f32.powf(effective_gain_db / 20.0).clamp(0.25, 2.5);
                             target_vol = (self.volume * factor).clamp(0.0, 1.0);
                         }
                     }
                 }
             }
             output.set_volume(target_vol);
+        }
+    }
+
+    fn reopen_audio_device(&mut self, latency: LatencyProfile) {
+        let current_pos = self.playback.elapsed;
+        let was_playing = self.is_playing;
+        let profile = self.sound_profile;
+        let vol = self.volume;
+        if let Some(old) = self.audio_output.take() {
+            let _ = old.pause();
+        }
+        match AudioOutput::open_default_tuned(self.playback_sender.clone(), latency) {
+            Ok(new_out) => {
+                new_out.set_sound_profile(profile);
+                new_out.set_volume(if self.is_muted { 0.0 } else { vol });
+                if current_pos > Duration::ZERO {
+                    new_out.set_position(current_pos);
+                }
+                if was_playing {
+                    if let Some(samples) = &self.current_track_samples {
+                        let sample_rate = new_out.config.sample_rate.0 as usize;
+                        let channels = usize::from(new_out.config.channels).max(1);
+                        let raw_offset = (current_pos.as_secs_f64() * sample_rate as f64 * channels as f64) as usize;
+                        let sample_offset = (raw_offset.min(samples.len())) / channels * channels;
+                        let queue = new_out.queue.clone();
+                        let samples_arc = Arc::clone(samples);
+                        let generation = self.playback_generation.fetch_add(1, Ordering::SeqCst) + 1;
+                        let pb_gen = Arc::clone(&self.playback_generation);
+                        thread::spawn(move || {
+                            let slice = &samples_arc[sample_offset..];
+                            queue.push_interleaved_cancellable(slice.iter().copied(), || {
+                                pb_gen.load(Ordering::SeqCst) == generation
+                            });
+                        });
+                        let _ = new_out.play();
+                    }
+                }
+                self.audio_output = Some(new_out);
+                self.audio_device_info = get_audio_device_info();
+            }
+            Err(e) => {
+                eprintln!("failed to tune audio output: {e}");
+            }
         }
     }
 
@@ -2252,6 +2403,61 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn test_themes_cycle_and_palettes() {
+        let all_themes = PlayerTheme::all();
+        assert_eq!(all_themes.len(), 6);
+
+        // Test cycle
+        let mut curr = PlayerTheme::EmeraldDark;
+        for _ in 0..6 {
+            curr = curr.next();
+        }
+        assert_eq!(curr, PlayerTheme::EmeraldDark);
+
+        for theme in all_themes {
+            let p = theme.palette();
+            assert!(!p.name.is_empty());
+            assert!(!p.description.is_empty());
+            if *theme == PlayerTheme::SolarizedLight {
+                assert!(!p.is_dark);
+            } else {
+                assert!(p.is_dark);
+            }
+        }
+    }
+
+    #[test]
+    fn test_sound_profiles_and_loudness_targets() {
+        assert_eq!(SoundProfile::all().len(), 6);
+        assert_eq!(TargetLoudness::all().len(), 3);
+        assert_eq!(LatencyProfile::all().len(), 4);
+
+        assert_eq!(TargetLoudness::Balanced18.target_lufs(), -18.0);
+        assert_eq!(TargetLoudness::Streaming14.target_lufs(), -14.0);
+        assert_eq!(TargetLoudness::Broadcast23.target_lufs(), -23.0);
+
+        assert_eq!(LatencyProfile::Default.label(), "System Default (Adaptive)");
+        assert_eq!(LatencyProfile::LowLatency.label(), "Low Latency (512 frames / ~11ms)");
+        assert_eq!(LatencyProfile::Balanced.label(), "Balanced (1024 frames / ~23ms)");
+        assert_eq!(LatencyProfile::HighStability.label(), "Safe Buffer (2048 frames / ~46ms)");
+    }
+
+    #[test]
+    fn test_test_tone_generation() {
+        let tone = kanono_audio_engine::generate_test_tone(44100, 0.5);
+        assert_eq!(tone.len(), 44100); // 0.5s stereo = 44100 samples
+        for &s in &tone {
+            assert!(s >= -1.0 && s <= 1.0);
+        }
+
+        let stereo_test = kanono_audio_engine::generate_stereo_channel_test(44100);
+        assert!(!stereo_test.is_empty());
+        for &s in &stereo_test {
+            assert!(s >= -1.0 && s <= 1.0);
         }
     }
 }
