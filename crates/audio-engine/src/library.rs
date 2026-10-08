@@ -103,13 +103,17 @@ impl LibraryDatabase {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
-            fs::create_dir_all(parent).with_context(|| format!("unable to create {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| format!("unable to create database directory {}", parent.display()))?;
         }
-        let mut connection = Connection::open(path)?;
+        let mut connection = Connection::open(path)
+            .with_context(|| format!("unable to open database file: {}", path.display()))?;
+        let _ = connection.busy_timeout(Duration::from_secs(5));
+        if connection.execute_batch("PRAGMA journal_mode = WAL;").is_err() {
+            let _ = connection.execute_batch("PRAGMA journal_mode = DELETE;");
+        }
+        let _ = connection.execute_batch("PRAGMA synchronous = NORMAL;");
         connection.execute_batch(
             "
-            PRAGMA journal_mode = WAL;
-            PRAGMA synchronous = NORMAL;
             CREATE TABLE IF NOT EXISTS tracks (
                 id INTEGER PRIMARY KEY,
                 path TEXT NOT NULL UNIQUE,

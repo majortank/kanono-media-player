@@ -404,20 +404,8 @@ impl Application for KanonoApp {
         };
         let components = PluginRegistry::load_components(component_directory());
         let mpris = MprisService::spawn();
-        let db_path = library_database_path();
-        let library = match LibraryDatabase::open(&db_path) {
-            Ok(db) => db,
-            Err(err) => {
-                eprintln!(
-                    "warning: failed to open library database at {}: {err}. Falling back to temporary directory.",
-                    db_path.display()
-                );
-                let fallback_path = std::env::temp_dir()
-                    .join("kanono-media-player")
-                    .join("library.sqlite3");
-                LibraryDatabase::open(&fallback_path).expect("failed to open fallback music library database")
-            }
-        };
+        let (library, effective_db_path) = init_library_database();
+        set_active_database_path(effective_db_path);
         let all_tracks = library.query(&TrackQuery::default()).unwrap_or_default();
         let raw_folders = library.get_raw_folders().unwrap_or_default();
         let library_folders: Vec<LibraryFolder> = raw_folders
@@ -1474,8 +1462,71 @@ fn user_data_directory() -> PathBuf {
         .join("kanono-media-player")
 }
 
+static ACTIVE_DATABASE_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+fn set_active_database_path(path: PathBuf) {
+    let _ = ACTIVE_DATABASE_PATH.set(path);
+}
+
+fn init_library_database() -> (LibraryDatabase, PathBuf) {
+    let primary_dir = user_data_directory();
+    if let Err(err) = std::fs::create_dir_all(&primary_dir) {
+        eprintln!(
+            "warning: failed to create primary data directory at {}: {err}",
+            primary_dir.display()
+        );
+    }
+    let primary_path = primary_dir.join("library.sqlite3");
+
+    match LibraryDatabase::open(&primary_path) {
+        Ok(db) => (db, primary_path),
+        Err(primary_err) => {
+            eprintln!(
+                "warning: failed to open library database at {}: {primary_err}. Trying alternate locations...",
+                primary_path.display()
+            );
+
+            #[cfg(target_os = "windows")]
+            if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+                let local_dir = PathBuf::from(local).join("kanono-media-player");
+                let _ = std::fs::create_dir_all(&local_dir);
+                let local_path = local_dir.join("library.sqlite3");
+                if let Ok(db) = LibraryDatabase::open(&local_path) {
+                    eprintln!("info: using local app data database at {}", local_path.display());
+                    return (db, local_path);
+                }
+            }
+
+            let fallback_dir = std::env::temp_dir().join("kanono-media-player");
+            let _ = std::fs::create_dir_all(&fallback_dir);
+            let fallback_path = fallback_dir.join("library.sqlite3");
+            match LibraryDatabase::open(&fallback_path) {
+                Ok(db) => {
+                    eprintln!("info: using temporary database at {}", fallback_path.display());
+                    (db, fallback_path)
+                }
+                Err(fallback_err) => {
+                    eprintln!(
+                        "warning: failed to open fallback database at {}: {fallback_err}. Falling back to in-memory database.",
+                        fallback_path.display()
+                    );
+                    let mem_db = LibraryDatabase::open(":memory:").expect("failed to open in-memory database");
+                    (mem_db, PathBuf::from(":memory:"))
+                }
+            }
+        }
+    }
+}
+
 fn library_database_path() -> PathBuf {
-    user_data_directory().join("library.sqlite3")
+    if let Some(path) = ACTIVE_DATABASE_PATH.get() {
+        return path.clone();
+    }
+    let default_path = user_data_directory().join("library.sqlite3");
+    if let Some(parent) = default_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    default_path
 }
 
 impl KanonoApp {
