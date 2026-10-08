@@ -105,6 +105,13 @@ impl MprisRoot {
             "audio/aac",
             "audio/x-aiff",
             "audio/x-caf",
+            "video/mp4",
+            "video/x-matroska",
+            "video/webm",
+            "video/x-msvideo",
+            "video/quicktime",
+            "video/x-ms-wmv",
+            "video/x-flv",
         ]
     }
 }

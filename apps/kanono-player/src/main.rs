@@ -944,18 +944,22 @@ pub struct IndexResult {
 
 async fn pick_music_files() -> Option<Vec<PathBuf>> {
     rfd::AsyncFileDialog::new()
-        .set_title("Add Audio Files (WebM, MP3, FLAC, WAV, OGG...)")
+        .set_title("Add Audio & Video Songs (MP3, MP4, FLAC, MKV, WAV, WebM, AVI...)")
         .add_filter(
-            "Supported Audio (*.webm, *.mkv, *.mp3, *.flac, *.wav, *.ogg, *.m4a...)",
+            "Supported Media & Songs (*.mp3, *.flac, *.wav, *.mp4, *.mkv, *.webm, *.avi, *.mov...)",
             &[
-                "webm", "mkv", "mp3", "mp2", "mp1", "flac", "wav", "wave", "ogg", "oga", "m4a",
-                "m4b", "mp4", "aac", "alac", "aiff", "aif", "caf",
+                "mp3", "mp2", "mp1", "flac", "wav", "wave", "ogg", "oga", "m4a", "m4b", "aac", "alac", "aiff", "aif", "caf",
+                "mp4", "m4v", "mkv", "webm", "avi", "mov", "wmv", "flv", "3gp", "ts", "mts", "m2ts", "ogv", "vob", "asf",
             ],
         )
-        .add_filter("WebM / Matroska Audio (*.webm, *.mkv)", &["webm", "mkv"])
+        .add_filter(
+            "Video Songs & Containers (*.mp4, *.mkv, *.webm, *.avi, *.mov, *.wmv, *.flv)",
+            &["mp4", "m4v", "mkv", "webm", "avi", "mov", "wmv", "flv", "3gp", "ts", "mts", "m2ts", "ogv", "vob", "asf"],
+        )
         .add_filter("MP3 Audio (*.mp3)", &["mp3"])
         .add_filter("FLAC Lossless Audio (*.flac)", &["flac"])
         .add_filter("Waveform Audio (*.wav, *.wave)", &["wav", "wave"])
+        .add_filter("WebM / Matroska (*.webm, *.mkv)", &["webm", "mkv"])
         .add_filter("Ogg Vorbis / Opus (*.ogg, *.oga)", &["ogg", "oga"])
         .add_filter("AAC / MP4 Audio (*.m4a, *.mp4, *.aac)", &["m4a", "mp4", "aac"])
         .add_filter("All Files (*.*)", &["*"])
@@ -966,7 +970,7 @@ async fn pick_music_files() -> Option<Vec<PathBuf>> {
 
 async fn pick_music_folder() -> Option<PathBuf> {
     rfd::AsyncFileDialog::new()
-        .set_title("Add Music Folder (Scans WebM, MP3, FLAC, WAV, OGG...)")
+        .set_title("Add Music Folder (Scans Songs, Audio & Video formats)")
         .pick_folder()
         .await
         .map(|handle| handle.path().to_owned())

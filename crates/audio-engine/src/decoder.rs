@@ -93,18 +93,37 @@ where
     F: FnMut(&[f32]),
 {
     let path = path.as_ref();
-    let source = File::open(path).with_context(|| format!("unable to open {}", path.display()))?;
-    let stream = MediaSourceStream::new(Box::new(source), Default::default());
-    let mut hint = Hint::new();
-    if let Some(extension) = path.extension().and_then(|extension| extension.to_str()) {
-        hint.with_extension(extension);
-    }
-    let mut probed = symphonia::default::get_probe().format(
-        &hint,
-        stream,
-        &FormatOptions::default(),
-        &MetadataOptions::default(),
-    )?;
+    let probed_result = (|| -> Result<_> {
+        let source = File::open(path).with_context(|| format!("unable to open {}", path.display()))?;
+        let stream = MediaSourceStream::new(Box::new(source), Default::default());
+        let mut hint = Hint::new();
+        if let Some(extension) = path.extension().and_then(|extension| extension.to_str()) {
+            hint.with_extension(extension);
+        }
+        let probed = symphonia::default::get_probe().format(
+            &hint,
+            stream,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )?;
+        Ok(probed)
+    })();
+
+    let mut probed = match probed_result {
+        Ok(p) => p,
+        Err(err) => {
+            if crate::ffmpeg::is_ffmpeg_available() {
+                return crate::ffmpeg::decode_track_streaming_ffmpeg(
+                    path,
+                    target_sample_rate,
+                    target_channels,
+                    should_continue,
+                    on_pcm_chunk,
+                );
+            }
+            return Err(err);
+        }
+    };
 
     let default_title = path.file_stem().and_then(|name| name.to_str()).unwrap_or("Unknown title").to_owned();
     let mut metadata = TrackMetadata {
@@ -150,27 +169,89 @@ where
         extract_meta(rev.tags());
     }
 
-    let (track_id, track_codec_params, mut sample_rate, mut channels, duration) = {
-        let track = format.default_track().context("file has no default audio track")?;
-        if track.codec_params.codec == CODEC_TYPE_NULL {
-            anyhow::bail!("file uses an unsupported audio codec");
+    let is_supported_audio = |t: &symphonia::core::formats::Track| {
+        t.codec_params.codec != CODEC_TYPE_NULL && (
+            t.codec_params.codec == CODEC_TYPE_OPUS
+            || symphonia::default::get_codecs().get_codec(t.codec_params.codec).is_some()
+        )
+    };
+
+    let audio_track = if let Some(track) = format.default_track().filter(|t| is_supported_audio(t)) {
+        Some(track.clone())
+    } else if let Some(track) = format.tracks().iter().find(|t| is_supported_audio(t)) {
+        Some(track.clone())
+    } else {
+        format.tracks().iter().find(|t| t.codec_params.codec != CODEC_TYPE_NULL).cloned()
+    };
+
+    let Some(track) = audio_track else {
+        if crate::ffmpeg::is_ffmpeg_available() {
+            return crate::ffmpeg::decode_track_streaming_ffmpeg(
+                path,
+                target_sample_rate,
+                target_channels,
+                should_continue,
+                on_pcm_chunk,
+            );
         }
-        let track_id = track.id;
-        let sample_rate = track.codec_params.sample_rate.unwrap_or(0);
-        let channels = track.codec_params.channels.map(|c| c.count() as u16).unwrap_or(0);
-        let duration = if let (Some(time_base), Some(frames)) = (track.codec_params.time_base, track.codec_params.n_frames) {
+        anyhow::bail!("file has no supported audio track");
+    };
+
+    let track_id = track.id;
+    let track_codec_params = track.codec_params.clone();
+    let is_opus = track_codec_params.codec == CODEC_TYPE_OPUS;
+
+    if !is_opus && symphonia::default::get_codecs().get_codec(track_codec_params.codec).is_none() {
+        if crate::ffmpeg::is_ffmpeg_available() {
+            return crate::ffmpeg::decode_track_streaming_ffmpeg(
+                path,
+                target_sample_rate,
+                target_channels,
+                should_continue,
+                on_pcm_chunk,
+            );
+        }
+        anyhow::bail!("file uses an unsupported audio codec");
+    }
+
+    let mut sample_rate = track_codec_params.sample_rate.unwrap_or(0);
+    let mut channels = track_codec_params.channels.map(|c| c.count() as u16).unwrap_or(0);
+    let mut duration = None;
+
+    for t in format.tracks() {
+        if let (Some(time_base), Some(frames)) = (t.codec_params.time_base, t.codec_params.n_frames) {
             let dur = time_base.calc_time(frames);
             let secs = dur.seconds as f64 + dur.frac;
             if secs > 0.0 {
-                Some(Duration::from_secs_f64(secs))
-            } else {
-                None
+                duration = Some(Duration::from_secs_f64(secs));
+                break;
             }
-        } else {
-            None
-        };
-        (track_id, track.codec_params.clone(), sample_rate, channels, duration)
-    };
+        }
+    }
+
+    if duration.is_none() && crate::ffmpeg::is_ffmpeg_available() {
+        if let Some(media_meta) = crate::ffmpeg::probe_file(path) {
+            if let Some(dur) = media_meta.duration {
+                duration = Some(dur);
+            }
+            if let Some(title) = media_meta.title {
+                if !title.is_empty() && (metadata.title.is_empty() || metadata.title == default_title) {
+                    metadata.title = title;
+                }
+            }
+            if let Some(artist) = media_meta.artist {
+                if !artist.is_empty() && metadata.artist == "Unknown Artist" {
+                    metadata.artist = artist;
+                }
+            }
+            if let Some(album) = media_meta.album {
+                if !album.is_empty() && metadata.album == "Unknown Album" {
+                    metadata.album = album;
+                }
+            }
+        }
+    }
+
     if duration.is_some() {
         metadata.duration = duration;
     }
@@ -319,7 +400,21 @@ where
             flush_chunk(&[], sample_rate, channels, true);
         }
     } else {
-        let mut decoder = symphonia::default::get_codecs().make(&track_codec_params, &Default::default())?;
+        let mut decoder = match symphonia::default::get_codecs().make(&track_codec_params, &Default::default()) {
+            Ok(d) => d,
+            Err(e) => {
+                if crate::ffmpeg::is_ffmpeg_available() {
+                    return crate::ffmpeg::decode_track_streaming_ffmpeg(
+                        path,
+                        target_sample_rate,
+                        target_channels,
+                        should_continue,
+                        on_pcm_chunk,
+                    );
+                }
+                return Err(e.into());
+            }
+        };
         let mut is_first = true;
 
         loop {
@@ -578,6 +673,71 @@ mod tests {
     }
 
     #[test]
+    fn test_video_formats_decode_as_audio() {
+        // Test AVI video format (Symphonia unsupported, FFmpeg fallback)
+        let temp_avi = std::env::temp_dir().join("kanono_test_video.avi");
+        let avi_status = std::process::Command::new("ffmpeg")
+            .args([
+                "-f", "lavfi", "-i", "testsrc=duration=1:size=320x240:rate=24",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                "-c:v", "mpeg4",
+                "-c:a", "mp3",
+                "-y",
+                temp_avi.to_str().unwrap(),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+
+        if let Ok(s) = avi_status {
+            if s.success() {
+                let decoded = decode_track(&temp_avi).expect("AVI video file should decode audio successfully");
+                assert!(decoded.sample_rate > 0);
+                assert!(decoded.channels > 0);
+                assert!(!decoded.samples.is_empty());
+                assert!(decoded.metadata.duration.is_some());
+                let _ = std::fs::remove_file(&temp_avi);
+            }
+        }
+
+        // Test MP4 video format with video stream 0 and AAC audio stream 1
+        let temp_mp4 = std::env::temp_dir().join("kanono_test_video.mp4");
+        let mp4_status = std::process::Command::new("ffmpeg")
+            .args([
+                "-f", "lavfi", "-i", "testsrc=duration=1:size=320x240:rate=24",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                "-c:v", "libx264",
+                "-c:a", "aac",
+                "-y",
+                temp_mp4.to_str().unwrap(),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+
+        if let Ok(s) = mp4_status {
+            if s.success() {
+                let decoded = decode_track(&temp_mp4).expect("MP4 video file should decode audio successfully");
+                assert!(decoded.sample_rate > 0);
+                assert!(decoded.channels > 0);
+                assert!(!decoded.samples.is_empty());
+                assert!(decoded.metadata.duration.is_some());
+                let _ = std::fs::remove_file(&temp_mp4);
+            }
+        }
+
+        // Test local user video files if present
+        let test_user_path = std::path::Path::new("/home/likanono/Downloads/Bekezela_1080p.mp4");
+        if test_user_path.exists() {
+            let decoded = decode_track(test_user_path).expect("Bekezela MP4 should decode successfully");
+            assert_eq!(decoded.sample_rate, 44100);
+            assert_eq!(decoded.channels, 2);
+            assert!(!decoded.samples.is_empty());
+            assert!(decoded.metadata.duration.is_some());
+        }
+    }
+
+    #[test]
     fn test_streaming_decode() {
         use std::path::PathBuf;
         let p = PathBuf::from("/tmp/kanono_demo_music/01 - Kanono Groove.wav");
@@ -614,5 +774,26 @@ mod tests {
             );
             assert!(aborted_chunks.load(Ordering::SeqCst) <= 3, "Cancellation must stop decoding early");
         }
+    }
+
+    #[test]
+    fn test_debug_mp3_null() {
+        let p = std::path::Path::new("/home/likanono/Music/famo/Khopolo/Lejoe La Frerene/Lejoe La Ferene No. 4/01 Track 1.mp3");
+        let source = std::fs::File::open(p).unwrap();
+        let stream = symphonia::core::io::MediaSourceStream::new(Box::new(source), Default::default());
+        let mut hint = symphonia::core::probe::Hint::new();
+        hint.with_extension("mp3");
+        let mut probed = symphonia::default::get_probe().format(&hint, stream, &Default::default(), &Default::default()).unwrap();
+        if let Some(rev) = probed.metadata.get().as_ref().and_then(|m| m.current()) {
+            for tag in rev.tags() {
+                println!("Tag key={:?} std_key={:?} val={:?}", tag.key, tag.std_key, tag.value);
+                if let symphonia::core::meta::Value::String(s) = &tag.value {
+                    if s.contains('\0') {
+                        panic!("SYMPHONIA TAG HAS NULL: key={} val={:?}", tag.key, s);
+                    }
+                }
+            }
+        }
+        panic!("No null in metadata");
     }
 }

@@ -289,13 +289,14 @@ pub fn read_track(path: &Path) -> Result<LibraryTrack> {
             &FormatOptions::default(),
             &MetadataOptions::default(),
         ) {
-            // Duration calculation from default audio track
-            if let Some(audio_track) = probed.format.default_track() {
+            // Duration calculation from any track with valid frames
+            for audio_track in probed.format.tracks() {
                 if let (Some(time_base), Some(n_frames)) = (audio_track.codec_params.time_base, audio_track.codec_params.n_frames) {
                     let duration = time_base.calc_time(n_frames);
                     let secs = duration.seconds as f64 + duration.frac;
                     if secs > 0.0 {
                         track.duration = Some(Duration::from_secs_f64(secs));
+                        break;
                     }
                 }
             }
@@ -429,6 +430,41 @@ pub fn read_track(path: &Path) -> Result<LibraryTrack> {
         }
     }
 
+    // 4. Fallback to ffprobe for video formats, missing duration, or missing tags
+    if (track.duration.is_none() || track.artist.is_empty()) && crate::ffmpeg::is_ffmpeg_available() {
+        if let Some(media_meta) = crate::ffmpeg::probe_file(path) {
+            if track.duration.is_none() {
+                track.duration = media_meta.duration;
+            }
+            if let Some(title) = media_meta.title {
+                if !title.is_empty() && (track.title.is_empty() || track.title == default_title) {
+                    track.title = title;
+                }
+            }
+            if let Some(artist) = media_meta.artist {
+                if !artist.is_empty() && track.artist.is_empty() {
+                    track.artist = artist;
+                }
+            }
+            if let Some(album) = media_meta.album {
+                if !album.is_empty() && track.album.is_empty() {
+                    track.album = album;
+                }
+            }
+            if let Some(genre) = media_meta.genre {
+                if !genre.is_empty() && track.genre.is_empty() {
+                    track.genre = genre;
+                }
+            }
+            if track.year.is_none() {
+                track.year = media_meta.year;
+            }
+            if track.track_number.is_none() {
+                track.track_number = media_meta.track_number;
+            }
+        }
+    }
+
     if track.artist.is_empty() {
         track.artist = "Unknown Artist".to_string();
     }
@@ -537,13 +573,20 @@ fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryTrack> {
     })
 }
 
-fn is_supported(path: &Path) -> bool {
+pub fn is_supported_audio_extension(path: &Path) -> bool {
     path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| {
         matches!(
             extension.to_ascii_lowercase().as_str(),
-            "mp3" | "mp2" | "mp1" | "flac" | "wav" | "wave" | "webm" | "mkv" | "ogg" | "oga" | "m4a" | "m4b" | "mp4" | "aac" | "alac" | "aiff" | "aif" | "caf"
+            // Dedicated audio formats
+            "mp3" | "mp2" | "mp1" | "flac" | "wav" | "wave" | "ogg" | "oga" | "m4a" | "m4b" | "aac" | "alac" | "aiff" | "aif" | "caf"
+            // Video formats containing music / audio
+            | "webm" | "mkv" | "mp4" | "m4v" | "avi" | "mov" | "wmv" | "flv" | "3gp" | "ts" | "mts" | "m2ts" | "ogv" | "vob" | "asf"
         )
     })
+}
+
+pub fn is_supported(path: &Path) -> bool {
+    is_supported_audio_extension(path)
 }
 
 fn modification_seconds(path: &Path) -> Result<i64> {
@@ -621,5 +664,26 @@ mod tests {
         }).unwrap();
         assert_eq!(bpm_filtered.len(), 1);
         assert_eq!(bpm_filtered[0].title, "Motion Picture Soundtrack");
+    }
+
+    #[test]
+    fn test_video_track_reading_and_indexing() {
+        // Test supported extension check
+        assert!(is_supported_audio_extension(Path::new("song.mp4")));
+        assert!(is_supported_audio_extension(Path::new("video.mkv")));
+        assert!(is_supported_audio_extension(Path::new("clip.webm")));
+        assert!(is_supported_audio_extension(Path::new("movie.avi")));
+        assert!(is_supported_audio_extension(Path::new("music.mov")));
+        assert!(is_supported_audio_extension(Path::new("track.flv")));
+        assert!(is_supported_audio_extension(Path::new("song.wmv")));
+
+        let test_user_path = Path::new("/home/likanono/Downloads/Bekezela_1080p.mp4");
+        if test_user_path.exists() {
+            let track = read_track(test_user_path).expect("read_track should succeed on MP4 video song");
+            assert!(!track.title.is_empty());
+            assert!(track.duration.is_some(), "Duration must be resolved for MP4 song");
+            let dur = track.duration.unwrap();
+            assert!(dur.as_secs() > 400, "Bekezela duration should be ~451s");
+        }
     }
 }

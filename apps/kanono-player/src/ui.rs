@@ -1239,8 +1239,9 @@ fn render_info_view<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
 
     // Multi-format decoding specs
     let format_specs = column![
-        text("Supported Multi-Format Audio Codecs (Symphonia)").size(16).style(Color::from_rgb8(52, 211, 153)),
-        text("• WebM / Matroska: .webm, .mkv (Opus, Vorbis, PCM audio)").size(13).style(Color::from_rgb8(203, 213, 225)),
+        text("Supported Multi-Format Audio & Media Codecs").size(16).style(Color::from_rgb8(52, 211, 153)),
+        text("• Video Song Containers: .mp4, .mkv, .webm, .avi, .mov, .wmv, .flv, .3gp (Plays audio tracks)").size(13).style(Color::from_rgb8(203, 213, 225)),
+        text("• WebM / Matroska: .webm, .mkv (Opus, Vorbis, AAC, PCM audio)").size(13).style(Color::from_rgb8(203, 213, 225)),
         text("• MPEG Audio: .mp3, .mp2, .mp1 (Layer I, II, III)").size(13).style(Color::from_rgb8(203, 213, 225)),
         text("• Free Lossless Audio Codec: .flac (Native 16/24-bit lossless)").size(13).style(Color::from_rgb8(203, 213, 225)),
         text("• Waveform Audio: .wav, .wave (Linear PCM, IEEE float)").size(13).style(Color::from_rgb8(203, 213, 225)),
