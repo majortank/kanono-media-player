@@ -39,6 +39,9 @@ Download precompiled standalone binaries and installers for your operating syste
 > [!TIP]
 > View all version tags, changelogs, and checksums on the [GitHub Releases page](https://github.com/majortank/kanono-media-player/releases).
 
+> [!NOTE]
+> **Windows Installation**: As an independent open-source project without a commercial code-signing certificate, Windows SmartScreen may show a prompt ("Windows protected your PC"). Click **"More info"** and then **"Run anyway"** to proceed. Administrator privileges are no longer required to install or run the player.
+
 ## A Player Built Around Your Library
 
 Kanono is a lightweight, customizable player for audiophiles, power users, and collectors. Browse a large collection quickly, queue music without losing your place, tune the playback chain, and keep the desktop integration you expect.
