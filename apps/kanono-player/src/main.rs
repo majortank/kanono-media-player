@@ -410,9 +410,17 @@ impl Application for KanonoApp {
         let now_playing = if self.playback.metadata.title.is_empty() {
             "Ready".to_string()
         } else {
-            format!("{} - {}", self.playback.metadata.artist, self.playback.metadata.title)
+            let artist = kanono_audio_engine::sanitize_metadata_string(&self.playback.metadata.artist);
+            let title = kanono_audio_engine::sanitize_metadata_string(&self.playback.metadata.title);
+            if artist.is_empty() {
+                title
+            } else {
+                format!("{} - {}", artist, title)
+            }
         };
-        format!("Kanono Media Player - {}", now_playing)
+        let full_title = format!("Kanono Media Player - {}", now_playing);
+        // Guarantee no null characters under any circumstances (prevent Wayland / winit NulError panics)
+        full_title.replace('\0', "")
     }
 
     fn theme(&self) -> Self::Theme {

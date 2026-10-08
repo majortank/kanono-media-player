@@ -55,13 +55,36 @@ pub struct LibraryDatabase {
     connection: Connection,
 }
 
+/// Cleans and sanitizes metadata strings by replacing null bytes (\0) with commas,
+/// stripping control characters, and normalizing whitespace.
+/// This prevents crashes in UI toolkits and Wayland protocols (NulError) caused by null characters.
+pub fn sanitize_metadata_string(s: &str) -> String {
+    let parts: Vec<&str> = s
+        .split('\0')
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty())
+        .collect();
+
+    if parts.is_empty() {
+        return String::new();
+    }
+
+    let joined = parts.join(", ");
+    let cleaned: String = joined
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+
+    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 impl LibraryDatabase {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
             fs::create_dir_all(parent).with_context(|| format!("unable to create {}", parent.display()))?;
         }
-        let connection = Connection::open(path)?;
+        let mut connection = Connection::open(path)?;
         connection.execute_batch(
             "
             PRAGMA journal_mode = WAL;
@@ -93,6 +116,45 @@ impl LibraryDatabase {
 
         // Create index on play_count after ensuring the column exists
         let _ = connection.execute("CREATE INDEX IF NOT EXISTS tracks_play_count ON tracks(play_count DESC)", []);
+
+        // Sanitize any existing rows containing embedded null bytes in title, artist, album, genre
+        let dirty_rows: Vec<(i64, String, String, String, String)> = {
+            let mut sanitize_stmt = connection.prepare(
+                "SELECT id, title, artist, album, genre FROM tracks
+                 WHERE instr(title, char(0)) > 0
+                    OR instr(artist, char(0)) > 0
+                    OR instr(album, char(0)) > 0
+                    OR instr(genre, char(0)) > 0",
+            )?;
+            let rows = sanitize_stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            rows
+        };
+
+        if !dirty_rows.is_empty() {
+            let tx = connection.transaction()?;
+            for (id, title, artist, album, genre) in dirty_rows {
+                let clean_title = sanitize_metadata_string(&title);
+                let clean_artist = sanitize_metadata_string(&artist);
+                let clean_album = sanitize_metadata_string(&album);
+                let clean_genre = sanitize_metadata_string(&genre);
+                tx.execute(
+                    "UPDATE tracks SET title = ?1, artist = ?2, album = ?3, genre = ?4 WHERE id = ?5",
+                    params![clean_title, clean_artist, clean_album, clean_genre, id],
+                )?;
+            }
+            tx.commit()?;
+        }
 
         Ok(Self { connection })
     }
@@ -304,9 +366,14 @@ pub fn read_track(path: &Path) -> Result<LibraryTrack> {
             // Extract tags from container / stream metadata
             let mut extract_tags = |tags: &[symphonia::core::meta::Tag]| {
                 for tag in tags {
-                    let val = match &tag.value {
-                        symphonia::core::meta::Value::String(s) => s.trim().to_string(),
-                        val => val.to_string().trim().to_string(),
+                    let raw = match &tag.value {
+                        symphonia::core::meta::Value::String(s) => s.as_str(),
+                        _ => "",
+                    };
+                    let val = if raw.is_empty() {
+                        sanitize_metadata_string(&tag.value.to_string())
+                    } else {
+                        sanitize_metadata_string(raw)
                     };
                     if val.is_empty() {
                         continue;
@@ -375,23 +442,27 @@ pub fn read_track(path: &Path) -> Result<LibraryTrack> {
     if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("mp3")) || track.artist.is_empty() {
         if let Ok(tag) = Tag::read_from_path(path) {
             if let Some(title) = tag.title() {
-                if !title.is_empty() {
-                    track.title = title.to_owned();
+                let clean = sanitize_metadata_string(title);
+                if !clean.is_empty() {
+                    track.title = clean;
                 }
             }
             if let Some(artist) = tag.artist() {
-                if !artist.is_empty() && track.artist.is_empty() {
-                    track.artist = artist.to_owned();
+                let clean = sanitize_metadata_string(artist);
+                if !clean.is_empty() && track.artist.is_empty() {
+                    track.artist = clean;
                 }
             }
             if let Some(album) = tag.album() {
-                if !album.is_empty() && track.album.is_empty() {
-                    track.album = album.to_owned();
+                let clean = sanitize_metadata_string(album);
+                if !clean.is_empty() && track.album.is_empty() {
+                    track.album = clean;
                 }
             }
             if let Some(genre) = tag.genre() {
-                if !genre.is_empty() && track.genre.is_empty() {
-                    track.genre = genre.to_owned();
+                let clean = sanitize_metadata_string(genre);
+                if !clean.is_empty() && track.genre.is_empty() {
+                    track.genre = clean;
                 }
             }
             if track.year.is_none() {
@@ -437,23 +508,27 @@ pub fn read_track(path: &Path) -> Result<LibraryTrack> {
                 track.duration = media_meta.duration;
             }
             if let Some(title) = media_meta.title {
-                if !title.is_empty() && (track.title.is_empty() || track.title == default_title) {
-                    track.title = title;
+                let clean = sanitize_metadata_string(&title);
+                if !clean.is_empty() && (track.title.is_empty() || track.title == default_title) {
+                    track.title = clean;
                 }
             }
             if let Some(artist) = media_meta.artist {
-                if !artist.is_empty() && track.artist.is_empty() {
-                    track.artist = artist;
+                let clean = sanitize_metadata_string(&artist);
+                if !clean.is_empty() && track.artist.is_empty() {
+                    track.artist = clean;
                 }
             }
             if let Some(album) = media_meta.album {
-                if !album.is_empty() && track.album.is_empty() {
-                    track.album = album;
+                let clean = sanitize_metadata_string(&album);
+                if !clean.is_empty() && track.album.is_empty() {
+                    track.album = clean;
                 }
             }
             if let Some(genre) = media_meta.genre {
-                if !genre.is_empty() && track.genre.is_empty() {
-                    track.genre = genre;
+                let clean = sanitize_metadata_string(&genre);
+                if !clean.is_empty() && track.genre.is_empty() {
+                    track.genre = clean;
                 }
             }
             if track.year.is_none() {
@@ -464,6 +539,11 @@ pub fn read_track(path: &Path) -> Result<LibraryTrack> {
             }
         }
     }
+
+    track.title = sanitize_metadata_string(&track.title);
+    track.artist = sanitize_metadata_string(&track.artist);
+    track.album = sanitize_metadata_string(&track.album);
+    track.genre = sanitize_metadata_string(&track.genre);
 
     if track.artist.is_empty() {
         track.artist = "Unknown Artist".to_string();
@@ -561,10 +641,10 @@ fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryTrack> {
     Ok(LibraryTrack {
         id: row.get(0)?,
         path: PathBuf::from(row.get::<_, String>(1)?),
-        title: row.get(2)?,
-        artist: row.get(3)?,
-        album: row.get(4)?,
-        genre: row.get(5)?,
+        title: sanitize_metadata_string(&row.get::<_, String>(2)?),
+        artist: sanitize_metadata_string(&row.get::<_, String>(3)?),
+        album: sanitize_metadata_string(&row.get::<_, String>(4)?),
+        genre: sanitize_metadata_string(&row.get::<_, String>(5)?),
         year: row.get(6)?,
         track_number: row.get(7)?,
         duration: duration_ms.map(|value| Duration::from_millis(value as u64)),
@@ -685,5 +765,65 @@ mod tests {
             let dur = track.duration.unwrap();
             assert!(dur.as_secs() > 400, "Bekezela duration should be ~451s");
         }
+    }
+
+    #[test]
+    fn test_sanitize_metadata_string() {
+        assert_eq!(
+            sanitize_metadata_string("Khopolo Ka Lejoe La Ferene 4\0KHOPOLO"),
+            "Khopolo Ka Lejoe La Ferene 4, KHOPOLO"
+        );
+        assert_eq!(sanitize_metadata_string("Artist\0"), "Artist");
+        assert_eq!(sanitize_metadata_string("\0\0Artist\0\0"), "Artist");
+        assert_eq!(sanitize_metadata_string("Ben Acker\0Ben Blacker"), "Ben Acker, Ben Blacker");
+        assert_eq!(sanitize_metadata_string("Track 1\r\n"), "Track 1");
+        assert_eq!(sanitize_metadata_string(""), "");
+    }
+
+    #[test]
+    fn test_database_null_character_migration() {
+        let temp_dir = std::env::temp_dir().join(format!("kanono_test_db_{}", std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        let db_path = temp_dir.join("test_library.sqlite3");
+        let _ = fs::create_dir_all(&temp_dir);
+
+        {
+            // Create dirty database directly with embedded null characters
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE tracks (
+                    id INTEGER PRIMARY KEY,
+                    path TEXT NOT NULL UNIQUE,
+                    title TEXT NOT NULL,
+                    artist TEXT NOT NULL,
+                    album TEXT NOT NULL,
+                    genre TEXT NOT NULL,
+                    year INTEGER,
+                    track_number INTEGER,
+                    duration_ms INTEGER,
+                    modified_at INTEGER NOT NULL,
+                    play_count INTEGER DEFAULT 0,
+                    bpm INTEGER,
+                    last_played_at INTEGER
+                );",
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO tracks (id, path, title, artist, album, genre, modified_at)
+                 VALUES (1, '/p/1.mp3', 'Track 1', ?1, ?2, 'Genre', 100)",
+                params!["Khopolo Ka Lejoe La Ferene 4\0KHOPOLO", "Album\0Name"],
+            ).unwrap();
+        }
+
+        {
+            // Opening LibraryDatabase should automatically migrate and sanitize all fields
+            let db = LibraryDatabase::open(&db_path).unwrap();
+            let tracks = db.query(&TrackQuery::default()).unwrap();
+            assert_eq!(tracks.len(), 1);
+            assert_eq!(tracks[0].artist, "Khopolo Ka Lejoe La Ferene 4, KHOPOLO");
+            assert_eq!(tracks[0].album, "Album, Name");
+            assert!(!tracks[0].artist.contains('\0'));
+            assert!(!tracks[0].album.contains('\0'));
+        }
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }

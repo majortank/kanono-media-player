@@ -78,6 +78,17 @@ pub fn decode_track(path: impl AsRef<Path>) -> Result<DecodedTrack> {
     decode_track_streaming(path, 0, 0, || true, |_| {})
 }
 
+/// Returns true if the file extension corresponds to a video container format
+/// (which can also hold audio tracks / video music).
+pub fn is_video_container(path: &Path) -> bool {
+    path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| {
+        matches!(
+            extension.to_ascii_lowercase().as_str(),
+            "webm" | "mkv" | "mp4" | "m4v" | "avi" | "mov" | "wmv" | "flv" | "3gp" | "ts" | "mts" | "m2ts" | "ogv" | "vob" | "asf"
+        )
+    })
+}
+
 /// Decodes an audio file in chunks, streaming resampled PCM samples directly to a callback.
 /// This enables zero-latency playback startup: the first audio buffer is pushed immediately
 /// while the remaining audio streams concurrently in the background.
@@ -93,6 +104,21 @@ where
     F: FnMut(&[f32]),
 {
     let path = path.as_ref();
+
+    // Video container files (MP4, MKV, WebM, AVI, MOV, etc.) contain multiplexed audio streams,
+    // frequently encoded in HE-AAC (with SBR/PS), AC-3, Opus, or other codecs which Symphonia either cannot demux
+    // or decodes at half sample rate without high-frequency SBR reconstruction.
+    // When FFmpeg is available on the host machine, prefer FFmpeg for video containers:
+    if is_video_container(path) && crate::ffmpeg::is_ffmpeg_available() {
+        return crate::ffmpeg::decode_track_streaming_ffmpeg(
+            path,
+            target_sample_rate,
+            target_channels,
+            should_continue,
+            on_pcm_chunk,
+        );
+    }
+
     let probed_result = (|| -> Result<_> {
         let source = File::open(path).with_context(|| format!("unable to open {}", path.display()))?;
         let stream = MediaSourceStream::new(Box::new(source), Default::default());
@@ -127,7 +153,7 @@ where
 
     let default_title = path.file_stem().and_then(|name| name.to_str()).unwrap_or("Unknown title").to_owned();
     let mut metadata = TrackMetadata {
-        title: default_title.clone(),
+        title: crate::library::sanitize_metadata_string(&default_title),
         artist: "Unknown Artist".to_owned(),
         album: "Unknown Album".to_owned(),
         duration: None,
@@ -136,8 +162,8 @@ where
     let mut extract_meta = |tags: &[symphonia::core::meta::Tag]| {
         for tag in tags {
             let val = match &tag.value {
-                symphonia::core::meta::Value::String(s) => s.trim().to_string(),
-                val => val.to_string().trim().to_string(),
+                symphonia::core::meta::Value::String(s) => crate::library::sanitize_metadata_string(s),
+                val => crate::library::sanitize_metadata_string(&val.to_string()),
             };
             if val.is_empty() {
                 continue;
@@ -431,12 +457,24 @@ where
             }
             match decoder.decode(&packet) {
                 Ok(decoded) => {
-                    if channels == 0 {
-                        channels = decoded.spec().channels.count() as u16;
+                    let packet_rate = decoded.spec().rate;
+                    let packet_channels = decoded.spec().channels.count() as u16;
+
+                    // If rate mismatch detected on first packet (e.g. HE-AAC where container claims 44100/48000
+                    // but AAC core is 22050/24000 without SBR) and FFmpeg is available, hand off to FFmpeg for
+                    // full frequency fidelity and correct playback speed:
+                    if is_first && sample_rate > 0 && packet_rate != sample_rate && crate::ffmpeg::is_ffmpeg_available() {
+                        return crate::ffmpeg::decode_track_streaming_ffmpeg(
+                            path,
+                            target_sample_rate,
+                            target_channels,
+                            should_continue,
+                            on_pcm_chunk,
+                        );
                     }
-                    if sample_rate == 0 {
-                        sample_rate = decoded.spec().rate;
-                    }
+
+                    channels = packet_channels;
+                    sample_rate = packet_rate;
                     append_f32(&mut chunk_buf, decoded);
 
                     let ch_count = usize::from(channels).max(1);
@@ -472,6 +510,10 @@ where
         let total_frames = all_samples.len() / usize::from(final_channels);
         metadata.duration = Some(Duration::from_secs_f64(total_frames as f64 / f64::from(final_rate)));
     }
+
+    metadata.title = crate::library::sanitize_metadata_string(&metadata.title);
+    metadata.artist = crate::library::sanitize_metadata_string(&metadata.artist);
+    metadata.album = crate::library::sanitize_metadata_string(&metadata.album);
 
     Ok(DecodedTrack {
         metadata,
@@ -777,23 +819,34 @@ mod tests {
     }
 
     #[test]
-    fn test_debug_mp3_null() {
-        let p = std::path::Path::new("/home/likanono/Music/famo/Khopolo/Lejoe La Frerene/Lejoe La Ferene No. 4/01 Track 1.mp3");
-        let source = std::fs::File::open(p).unwrap();
-        let stream = symphonia::core::io::MediaSourceStream::new(Box::new(source), Default::default());
-        let mut hint = symphonia::core::probe::Hint::new();
-        hint.with_extension("mp3");
-        let mut probed = symphonia::default::get_probe().format(&hint, stream, &Default::default(), &Default::default()).unwrap();
-        if let Some(rev) = probed.metadata.get().as_ref().and_then(|m| m.current()) {
-            for tag in rev.tags() {
-                println!("Tag key={:?} std_key={:?} val={:?}", tag.key, tag.std_key, tag.value);
-                if let symphonia::core::meta::Value::String(s) = &tag.value {
-                    if s.contains('\0') {
-                        panic!("SYMPHONIA TAG HAS NULL: key={} val={:?}", tag.key, s);
-                    }
-                }
-            }
+    fn test_he_aac_mp4_playback_and_tuning() {
+        let p = std::path::Path::new("/home/likanono/Music/famo/famo/Nyofa nyofa/7 - Ho phea khang.mp4");
+        if p.exists() && crate::ffmpeg::is_ffmpeg_available() {
+            let decoded = decode_track(p).expect("HE-AAC MP4 should decode successfully");
+            // Must decode at full 44100 Hz, not 22050 Hz core rate
+            assert_eq!(decoded.sample_rate, 44100);
+            assert_eq!(decoded.channels, 2);
+            // Must have full duration (~269.5s), not half duration (134s)
+            let dur = decoded.metadata.duration.expect("Duration must be present");
+            assert!(dur.as_secs() >= 265 && dur.as_secs() <= 275, "Expected duration ~269s, got {:?}", dur);
+            // Number of samples must correspond to full song (> 20M samples)
+            assert!(decoded.samples.len() > 20_000_000, "Must contain full sample frames");
         }
-        panic!("No null in metadata");
+    }
+
+    #[test]
+    fn test_null_byte_metadata_sanitization() {
+        let p = std::path::Path::new("/home/likanono/Music/famo/Khopolo/Lejoe La Frerene/Lejoe La Ferene No. 4/01 Track 1.mp3");
+        if p.exists() {
+            let trk = crate::library::read_track(p).expect("Should read track");
+            assert!(!trk.title.contains('\0'), "Title must not contain null byte");
+            assert!(!trk.artist.contains('\0'), "Artist must not contain null byte");
+            assert!(!trk.album.contains('\0'), "Album must not contain null byte");
+
+            let decoded = decode_track(p).expect("Should decode track");
+            assert!(!decoded.metadata.title.contains('\0'), "Decoded title must not contain null byte");
+            assert!(!decoded.metadata.artist.contains('\0'), "Decoded artist must not contain null byte");
+            assert!(!decoded.metadata.album.contains('\0'), "Decoded album must not contain null byte");
+        }
     }
 }

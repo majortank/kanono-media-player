@@ -82,15 +82,15 @@ pub fn probe_file(path: &Path) -> Option<MediaMetadata> {
         } else if let Some(rest) = line.strip_prefix("TAG:") {
             if let Some((key, val)) = rest.split_once('=') {
                 let key = key.to_ascii_uppercase();
-                let val = val.trim();
-                if val.is_empty() {
+                let clean_val = crate::library::sanitize_metadata_string(val);
+                if clean_val.is_empty() {
                     continue;
                 }
                 match key.as_str() {
-                    "TITLE" if meta.title.is_none() => meta.title = Some(val.to_string()),
-                    "ARTIST" if meta.artist.is_none() => meta.artist = Some(val.to_string()),
-                    "ALBUM" if meta.album.is_none() => meta.album = Some(val.to_string()),
-                    "GENRE" if meta.genre.is_none() => meta.genre = Some(val.to_string()),
+                    "TITLE" if meta.title.is_none() => meta.title = Some(clean_val),
+                    "ARTIST" if meta.artist.is_none() => meta.artist = Some(clean_val),
+                    "ALBUM" if meta.album.is_none() => meta.album = Some(clean_val),
+                    "GENRE" if meta.genre.is_none() => meta.genre = Some(clean_val),
                     "DATE" | "YEAR" if meta.year.is_none() => {
                         if let Ok(year) = val.chars().take(4).collect::<String>().parse::<i32>() {
                             meta.year = Some(year);
@@ -132,9 +132,9 @@ where
         .to_owned();
 
     let mut metadata = TrackMetadata {
-        title: probed.title.unwrap_or(default_title),
-        artist: probed.artist.unwrap_or_else(|| "Unknown Artist".to_owned()),
-        album: probed.album.unwrap_or_else(|| "Unknown Album".to_owned()),
+        title: crate::library::sanitize_metadata_string(&probed.title.unwrap_or(default_title)),
+        artist: crate::library::sanitize_metadata_string(&probed.artist.unwrap_or_else(|| "Unknown Artist".to_owned())),
+        album: crate::library::sanitize_metadata_string(&probed.album.unwrap_or_else(|| "Unknown Album".to_owned())),
         duration: probed.duration,
     };
 

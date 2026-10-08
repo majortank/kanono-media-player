@@ -24,7 +24,10 @@ struct MprisStateInner {
 }
 
 impl MprisState {
-    pub fn set_metadata(&self, metadata: TrackMetadata) {
+    pub fn set_metadata(&self, mut metadata: TrackMetadata) {
+        metadata.title = metadata.title.replace('\0', " ").trim().to_string();
+        metadata.artist = metadata.artist.replace('\0', ", ").trim().to_string();
+        metadata.album = metadata.album.replace('\0', " ").trim().to_string();
         self.inner.lock().expect("MPRIS state poisoned").metadata = metadata;
     }
 
