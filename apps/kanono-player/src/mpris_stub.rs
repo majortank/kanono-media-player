@@ -1,6 +1,7 @@
 use crossbeam_channel::{bounded, Receiver};
 use kanono_audio_engine::TrackMetadata;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub enum MprisCommand {
     Play,
