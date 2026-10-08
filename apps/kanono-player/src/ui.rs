@@ -36,6 +36,7 @@ const ICON_CHEVRON_RIGHT_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/sv
 const ICON_CHEVRON_DOWN_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#94a3b8"><polygon points="5,8 12,16 19,8"/></svg>"##;
 const ICON_CHECK_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#10b981"><polygon points="9,16.2 4.8,12 3.4,13.4 9,19 21,7 19.6,5.6"/></svg>"##;
 const ICON_FILTER_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#94a3b8"><path d="M10 18h4v-2h-4v2zM3 6v2h18V6H3zm3 7h12v-2H6v2z"/></svg>"##;
+const ICON_CLEAR_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#cbd5e1"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12 19 6.41z"/></svg>"##;
 
 fn svg_icon<'a, M: 'a>(data: &'static [u8], size: f32) -> Element<'a, M> {
     svg(svg::Handle::from_memory(data))
@@ -94,10 +95,24 @@ pub fn player_view<'a>(props: ViewProps<'a>, panes: &'a pane_grid::State<PlayerP
     .spacing(8)
     .align_items(Alignment::Center);
 
-    let search_bar = text_input("Search music library by title, artist, album, genre...", props.search)
-        .on_input(Message::SearchChanged)
-        .padding(9)
-        .width(Length::Fill);
+    let mut search_row = row![
+        text_input("Search music library by title, artist, album, genre...", props.search)
+            .on_input(Message::SearchChanged)
+            .padding(9)
+            .width(Length::Fill)
+    ]
+    .spacing(6)
+    .align_items(Alignment::Center)
+    .width(Length::Fill);
+
+    if !props.search.is_empty() {
+        search_row = search_row.push(
+            button(svg_icon(ICON_CLEAR_SVG, 12.0))
+                .on_press(Message::SearchChanged(String::new()))
+                .padding([8, 10])
+                .style(btn_default_style()),
+        );
+    }
 
     let top_actions = row![
         button(
@@ -139,7 +154,7 @@ pub fn player_view<'a>(props: ViewProps<'a>, panes: &'a pane_grid::State<PlayerP
     .spacing(8)
     .align_items(Alignment::Center);
 
-    let mut top_row = row![logo, search_bar].spacing(16).align_items(Alignment::Center);
+    let mut top_row = row![logo, search_row].spacing(16).align_items(Alignment::Center);
     if let Some(status) = props.status_message {
         top_row = top_row.push(
             container(text(status).size(12).style(Color::from_rgb8(52, 211, 153)))
@@ -473,7 +488,7 @@ fn render_sidebar<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
                 row![
                     svg_icon(ICON_FILTER_SVG, 12.0),
                     text(desc.trim()).size(11).style(Color::WHITE).width(Length::Fill),
-                    button(text("✕").size(11))
+                    button(svg_icon(ICON_CLEAR_SVG, 11.0))
                         .on_press(Message::ClearFilters)
                         .padding([2, 5])
                         .style(btn_invisible_style()),
@@ -715,7 +730,8 @@ fn render_track_list<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
         right_title_row = right_title_row.push(
             button(
                 row![
-                    text("✕ Clear").size(12),
+                    svg_icon(ICON_CLEAR_SVG, 11.0),
+                    text("Clear").size(12),
                 ]
                 .spacing(4)
                 .align_items(Alignment::Center),
@@ -766,7 +782,14 @@ fn render_track_list<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
                     .padding([5, 10])
                     .style(btn_accent_style()),
 
-                    button(text("✕ Deselect").size(12))
+                    button(
+                        row![
+                            svg_icon(ICON_CLEAR_SVG, 11.0),
+                            text("Deselect").size(12),
+                        ]
+                        .spacing(4)
+                        .align_items(Alignment::Center),
+                    )
                         .on_press(Message::ClearTrackSelection)
                         .padding([5, 8])
                         .style(btn_default_style()),
@@ -933,7 +956,14 @@ fn render_track_list<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
             container(
                 column![
                     text("No tracks match your current filter or search.").size(15).style(Color::from_rgb8(148, 163, 184)),
-                    button(text("Clear View & Filters").size(13))
+                    button(
+                        row![
+                            svg_icon(ICON_CLEAR_SVG, 13.0),
+                            text("Clear View & Filters").size(13).style(Color::WHITE),
+                        ]
+                        .spacing(6)
+                        .align_items(Alignment::Center),
+                    )
                         .on_press(Message::ClearAll)
                         .padding([8, 16])
                         .style(btn_primary_style()),
@@ -1124,10 +1154,17 @@ fn render_queue_list<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
         .spacing(8)
         .align_items(Alignment::Center),
         horizontal_space(),
-        button(text("Clear Queue").size(12))
-            .on_press(Message::ClearQueue)
-            .padding([6, 12])
-            .style(btn_default_style()),
+        button(
+            row![
+                svg_icon(ICON_CLEAR_SVG, 12.0),
+                text("Clear Queue").size(12),
+            ]
+            .spacing(4)
+            .align_items(Alignment::Center),
+        )
+        .on_press(Message::ClearQueue)
+        .padding([6, 12])
+        .style(btn_default_style()),
     ]
     .align_items(Alignment::Center);
 
@@ -1177,7 +1214,7 @@ fn render_queue_list<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
                 .on_press(Message::PlayTrack(track_id))
                 .padding([4, 8])
                 .style(btn_primary_style()),
-                button(text("✕").size(11))
+                button(svg_icon(ICON_CLEAR_SVG, 11.0))
                     .on_press(Message::RemoveFromQueue(q_idx))
                     .padding([4, 8])
                     .style(btn_default_style()),
