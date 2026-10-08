@@ -25,7 +25,7 @@ PrivilegesRequiredOverridesAllowed=dialog
 VersionInfoCompany={#AppPublisher}
 VersionInfoDescription=Kanono Media Player Setup
 VersionInfoProductName={#AppName}
-VersionInfoProductVersion={#AppVersion}
+VersionInfoProductTextVersion={#AppVersion}
 VersionInfoCopyright=Copyright (C) 2026 {#AppPublisher}
 
 [Files]
