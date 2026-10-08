@@ -2,6 +2,7 @@ use std::{
     io::Read,
     path::Path,
     process::{Command, Stdio},
+    sync::OnceLock,
     time::Duration,
 };
 
@@ -10,15 +11,18 @@ use anyhow::{Context, Result};
 use crate::decoder::DecodedTrack;
 use crate::playback_state::TrackMetadata;
 
-/// Check if ffmpeg is installed and callable on the host machine.
+/// Check if ffmpeg is installed and callable on the host machine (cached).
 pub fn is_ffmpeg_available() -> bool {
-    Command::new("ffmpeg")
-        .arg("-version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    })
 }
 
 /// Metadata extracted from a media file via ffprobe or ffmpeg.

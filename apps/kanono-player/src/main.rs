@@ -22,13 +22,13 @@ use std::{
 use crossbeam_channel::{Receiver, Sender};
 use iced::{executor, time, widget::pane_grid, Application, Command, Element, Subscription, Theme};
 use kanono_audio_engine::{
-    decode_track_streaming, playback_state_channel, AudioOutput, LibraryDatabase, LibraryTrack,
-    PlaybackStateReceiver, PlaybackStateSender, PlaybackUpdate, ReplayGainEvent, ReplayGainResult,
-    ReplayGainWorker, TagUpdate, TrackMetadata, TrackQuery,
+    compute_library_stats, decode_track_streaming, playback_state_channel, AudioOutput, LibraryDatabase, LibraryFolder,
+    LibraryStats, LibraryTrack, PlaybackStateReceiver, PlaybackStateSender, PlaybackUpdate,
+    ReplayGainEvent, ReplayGainResult, ReplayGainWorker, TagUpdate, TrackMetadata, TrackQuery,
 };
 use mpris::{MprisCommand, MprisService, MprisState};
 use plugins::PluginRegistry;
-use ui::{player_view, PlayerPane, ViewProps};
+use ui::{build_folder_tree, player_view, FolderTreeNode, PlayerPane, ViewProps};
 
 fn main() -> iced::Result {
     let mut settings = iced::Settings::default();
@@ -44,6 +44,7 @@ pub enum NavTab {
     MostPlayed,
     Queue,
     Folders,
+    LibraryManager,
     Info,
 }
 
@@ -258,6 +259,11 @@ pub struct KanonoApp {
     current_track_samples: Option<Arc<Vec<f32>>>,
     status_message: Option<String>,
     played_tracked_for_current: bool,
+    library_folders: Vec<LibraryFolder>,
+    library_stats: LibraryStats,
+    folder_tree: Vec<FolderTreeNode>,
+    is_scanning: bool,
+    confirm_clear_library: bool,
 }
 
 #[derive(Default)]
@@ -330,6 +336,21 @@ pub enum Message {
     GenerateSampleAudio,
     SampleAudioGenerated(Result<Vec<LibraryTrack>, String>),
     DurationsBatchResolved(Vec<(i64, Duration)>),
+    // Library Manager
+    RescanFolder(i64),
+    RescanAllFolders,
+    LibraryRescanned(Result<(usize, Vec<LibraryTrack>), String>),
+    RemoveLibraryFolder(i64, bool),
+    LibraryFolderRemoved(Result<Vec<LibraryTrack>, String>),
+    RemoveTrackFromLibrary(i64),
+    RemoveSelectedTracksFromLibrary,
+    TracksRemovedFromLibrary(Result<Vec<LibraryTrack>, String>),
+    PruneMissingTracks,
+    MissingTracksPruned(Result<(usize, Vec<LibraryTrack>), String>),
+    PromptClearLibrary,
+    ConfirmClearLibrary,
+    CancelClearLibrary,
+    LibraryCleared(Result<(), String>),
 }
 
 impl Application for KanonoApp {
@@ -354,6 +375,24 @@ impl Application for KanonoApp {
         let mpris = MprisService::spawn();
         let library = LibraryDatabase::open(library_database_path()).expect("failed to open music library database");
         let all_tracks = library.query(&TrackQuery::default()).unwrap_or_default();
+        let raw_folders = library.get_raw_folders().unwrap_or_default();
+        let library_folders: Vec<LibraryFolder> = raw_folders
+            .into_iter()
+            .map(|(id, path, added_at, last_scanned_at)| {
+                let track_count = all_tracks.iter().filter(|t| t.path.starts_with(&path)).count();
+                let exists_on_disk = path.exists();
+                LibraryFolder {
+                    id,
+                    path,
+                    added_at,
+                    last_scanned_at,
+                    track_count,
+                    exists_on_disk,
+                }
+            })
+            .collect();
+        let library_stats = compute_library_stats(&all_tracks, library_folders.len());
+        let folder_tree = build_folder_tree(&all_tracks);
         let replaygain_worker = Arc::new(ReplayGainWorker::spawn());
         let (decode_tx, decode_rx) = crossbeam_channel::unbounded();
         let (mut panes, sidebar_pane) = pane_grid::State::new(PlayerPane::Sidebar);
@@ -401,6 +440,11 @@ impl Application for KanonoApp {
             current_track_samples: None,
             status_message: None,
             played_tracked_for_current: false,
+            library_folders,
+            library_stats,
+            folder_tree,
+            is_scanning: false,
+            confirm_clear_library: false,
         };
         app.refresh_visible_tracks();
         (app, resolve_missing_durations())
@@ -504,6 +548,8 @@ impl Application for KanonoApp {
                     self.refresh_visible_tracks();
                 } else if tab == NavTab::MostPlayed {
                     self.refresh_visible_tracks();
+                } else if tab == NavTab::LibraryManager {
+                    self.refresh_library_manager_state();
                 }
             }
             Message::PlayMostPlayed => {
@@ -698,8 +744,7 @@ impl Application for KanonoApp {
                     if let Some(db) = &mut self.library {
                         let _ = db.mass_tag(&track_ids, &update);
                         if let Ok(tracks) = db.query(&TrackQuery::default()) {
-                            self.all_tracks = tracks;
-                            self.refresh_visible_tracks();
+                            self.set_all_tracks(tracks);
                             self.status_message = Some(format!("Updated tags for {} tracks", track_ids.len()));
                         }
                     }
@@ -856,8 +901,7 @@ impl Application for KanonoApp {
                     if let Some(db) = &mut self.library {
                         let _ = db.mass_tag(&[editing.track_id], &update);
                         if let Ok(tracks) = db.query(&TrackQuery::default()) {
-                            self.all_tracks = tracks;
-                            self.refresh_visible_tracks();
+                            self.set_all_tracks(tracks);
                             self.status_message = Some("Track tags updated successfully".to_string());
                         }
                     }
@@ -871,10 +915,9 @@ impl Application for KanonoApp {
             }
             Message::SampleAudioGenerated(res) => match res {
                 Ok(tracks) => {
-                    self.all_tracks = tracks;
+                    self.set_all_tracks(tracks);
                     self.selected_folder = None;
                     self.current_tab = NavTab::Library;
-                    self.refresh_visible_tracks();
                     self.status_message = Some("Sample music generated & loaded!".to_string());
                     if let Some(first) = self.visible_tracks.first() {
                         self.play_track(first.id);
@@ -886,12 +929,125 @@ impl Application for KanonoApp {
                 }
             },
             Message::DurationsBatchResolved(resolved) => {
+                let mut any = false;
                 for (id, dur) in resolved {
                     if let Some(t) = self.all_tracks.iter_mut().find(|t| t.id == id) {
                         t.duration = Some(dur);
+                        any = true;
                     }
                     if let Some(t) = self.visible_tracks.iter_mut().find(|t| t.id == id) {
                         t.duration = Some(dur);
+                    }
+                }
+                if any {
+                    self.library_stats = compute_library_stats(&self.all_tracks, self.library_folders.len());
+                }
+            }
+            Message::RescanFolder(folder_id) => {
+                self.is_scanning = true;
+                self.status_message = Some("Rescanning monitored folder...".to_string());
+                return Command::perform(rescan_single_folder(folder_id), Message::LibraryRescanned);
+            }
+            Message::RescanAllFolders => {
+                self.is_scanning = true;
+                self.status_message = Some("Rescanning all monitored folders...".to_string());
+                return Command::perform(rescan_all_library_folders(), Message::LibraryRescanned);
+            }
+            Message::LibraryRescanned(result) => {
+                self.is_scanning = false;
+                match result {
+                    Ok((count, tracks)) => {
+                        self.set_all_tracks(tracks);
+                        self.status_message = Some(format!("Scan complete: {} new or updated tracks indexed", count));
+                        return resolve_missing_durations();
+                    }
+                    Err(e) => {
+                        self.status_message = Some(format!("Scan error: {e}"));
+                    }
+                }
+            }
+            Message::RemoveLibraryFolder(folder_id, remove_tracks) => {
+                self.status_message = Some("Removing folder from library...".to_string());
+                return Command::perform(remove_library_folder_task(folder_id, remove_tracks), Message::LibraryFolderRemoved);
+            }
+            Message::LibraryFolderRemoved(result) => {
+                match result {
+                    Ok(tracks) => {
+                        self.set_all_tracks(tracks);
+                        self.status_message = Some("Monitored folder removed successfully".to_string());
+                    }
+                    Err(e) => {
+                        self.status_message = Some(format!("Error removing folder: {e}"));
+                    }
+                }
+            }
+            Message::RemoveTrackFromLibrary(track_id) => {
+                let track_title = self.all_tracks.iter().find(|t| t.id == track_id).map(|t| t.title.clone()).unwrap_or_else(|| "Track".to_string());
+                self.status_message = Some(format!("Removing \"{}\" from library...", track_title));
+                return Command::perform(remove_tracks_from_library_task(vec![track_id]), Message::TracksRemovedFromLibrary);
+            }
+            Message::RemoveSelectedTracksFromLibrary => {
+                let ids: Vec<i64> = self.selected_track_ids.iter().copied().collect();
+                if ids.is_empty() {
+                    return Command::none();
+                }
+                let count = ids.len();
+                self.selected_track_ids.clear();
+                self.status_message = Some(format!("Removing {} tracks from library...", count));
+                return Command::perform(remove_tracks_from_library_task(ids), Message::TracksRemovedFromLibrary);
+            }
+            Message::TracksRemovedFromLibrary(result) => {
+                match result {
+                    Ok(tracks) => {
+                        self.set_all_tracks(tracks);
+                        self.status_message = Some("Selected music removed from library".to_string());
+                    }
+                    Err(e) => {
+                        self.status_message = Some(format!("Error removing music: {e}"));
+                    }
+                }
+            }
+            Message::PruneMissingTracks => {
+                self.status_message = Some("Scanning disk for missing or moved songs...".to_string());
+                return Command::perform(prune_missing_files_task(), Message::MissingTracksPruned);
+            }
+            Message::MissingTracksPruned(result) => {
+                match result {
+                    Ok((count, tracks)) => {
+                        self.set_all_tracks(tracks);
+                        if count > 0 {
+                            self.status_message = Some(format!("Cleaned {} missing songs from library", count));
+                        } else {
+                            self.status_message = Some("All songs exist on disk. Library is fully up to date!".to_string());
+                        }
+                    }
+                    Err(e) => {
+                        self.status_message = Some(format!("Error cleaning missing songs: {e}"));
+                    }
+                }
+            }
+            Message::PromptClearLibrary => {
+                self.confirm_clear_library = true;
+            }
+            Message::CancelClearLibrary => {
+                self.confirm_clear_library = false;
+            }
+            Message::ConfirmClearLibrary => {
+                self.confirm_clear_library = false;
+                self.status_message = Some("Clearing entire library database...".to_string());
+                return Command::perform(clear_entire_library_task(), Message::LibraryCleared);
+            }
+            Message::LibraryCleared(result) => {
+                match result {
+                    Ok(()) => {
+                        self.set_all_tracks(Vec::new());
+                        self.queued_track_ids.clear();
+                        self.selected_track_ids.clear();
+                        self.selected_folder = None;
+                        self.status_message = Some("Library database cleared successfully".to_string());
+                    }
+                    Err(e) => {
+                        self.status_message = Some(format!("Error clearing library: {e}"));
                     }
                 }
             }
@@ -931,6 +1087,11 @@ impl Application for KanonoApp {
                 .and_then(|t| self.track_gains.get(&t.path).copied()),
             editing_track: self.editing_track.as_ref(),
             components: self.components.plugins(),
+            library_folders: &self.library_folders,
+            library_stats: &self.library_stats,
+            is_scanning: self.is_scanning,
+            confirm_clear_library: self.confirm_clear_library,
+            folder_tree: &self.folder_tree,
         }, &self.panes)
     }
 
@@ -1018,7 +1179,7 @@ async fn index_music_folder(folder: PathBuf) -> IndexResult {
         let folder = folder.clone();
         move || -> Result<Vec<LibraryTrack>, String> {
             let mut library = LibraryDatabase::open(database_path).map_err(|e| e.to_string())?;
-            library.scan_directory(&folder).map_err(|e| e.to_string())?;
+            library.add_folder_and_scan(&folder).map_err(|e| e.to_string())?;
             library.query(&TrackQuery::default()).map_err(|e| e.to_string())
         }
     })
@@ -1033,6 +1194,78 @@ async fn index_music_folder(folder: PathBuf) -> IndexResult {
             error: Some(format!("music indexing worker failed: {error}")),
         },
     }
+}
+
+async fn rescan_all_library_folders() -> Result<(usize, Vec<LibraryTrack>), String> {
+    let database_path = library_database_path();
+    tokio::task::spawn_blocking(move || -> Result<(usize, Vec<LibraryTrack>), String> {
+        let mut library = LibraryDatabase::open(database_path).map_err(|e| e.to_string())?;
+        let count = library.rescan_all_folders().map_err(|e| e.to_string())?;
+        let tracks = library.query(&TrackQuery::default()).map_err(|e| e.to_string())?;
+        Ok((count, tracks))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+async fn rescan_single_folder(folder_id: i64) -> Result<(usize, Vec<LibraryTrack>), String> {
+    let database_path = library_database_path();
+    tokio::task::spawn_blocking(move || -> Result<(usize, Vec<LibraryTrack>), String> {
+        let mut library = LibraryDatabase::open(database_path).map_err(|e| e.to_string())?;
+        let folders = library.get_folders().map_err(|e| e.to_string())?;
+        let folder = folders.into_iter().find(|f| f.id == folder_id)
+            .ok_or_else(|| "Monitored folder not found in database".to_string())?;
+        let count = library.scan_directory(&folder.path).map_err(|e| e.to_string())?;
+        let _ = library.update_folder_scanned(folder_id);
+        let tracks = library.query(&TrackQuery::default()).map_err(|e| e.to_string())?;
+        Ok((count, tracks))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+async fn remove_library_folder_task(folder_id: i64, remove_tracks: bool) -> Result<Vec<LibraryTrack>, String> {
+    let database_path = library_database_path();
+    tokio::task::spawn_blocking(move || -> Result<Vec<LibraryTrack>, String> {
+        let mut library = LibraryDatabase::open(database_path).map_err(|e| e.to_string())?;
+        library.remove_folder(folder_id, remove_tracks).map_err(|e| e.to_string())?;
+        library.query(&TrackQuery::default()).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+async fn remove_tracks_from_library_task(track_ids: Vec<i64>) -> Result<Vec<LibraryTrack>, String> {
+    let database_path = library_database_path();
+    tokio::task::spawn_blocking(move || -> Result<Vec<LibraryTrack>, String> {
+        let mut library = LibraryDatabase::open(database_path).map_err(|e| e.to_string())?;
+        library.delete_tracks(&track_ids).map_err(|e| e.to_string())?;
+        library.query(&TrackQuery::default()).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+async fn prune_missing_files_task() -> Result<(usize, Vec<LibraryTrack>), String> {
+    let database_path = library_database_path();
+    tokio::task::spawn_blocking(move || -> Result<(usize, Vec<LibraryTrack>), String> {
+        let mut library = LibraryDatabase::open(database_path).map_err(|e| e.to_string())?;
+        let pruned = library.prune_missing_tracks().map_err(|e| e.to_string())?;
+        let tracks = library.query(&TrackQuery::default()).map_err(|e| e.to_string())?;
+        Ok((pruned, tracks))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+async fn clear_entire_library_task() -> Result<(), String> {
+    let database_path = library_database_path();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let mut library = LibraryDatabase::open(database_path).map_err(|e| e.to_string())?;
+        library.clear_library().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn component_directory() -> PathBuf {
@@ -1288,11 +1521,42 @@ impl KanonoApp {
     fn apply_index_result(&mut self, result: IndexResult) {
         if let Some(error) = result.error {
             eprintln!("unable to index {}: {error}", result.folder.display());
+            self.status_message = Some(format!("Indexing error: {error}"));
             return;
         }
-        self.all_tracks = result.tracks;
+        self.set_all_tracks(result.tracks);
         self.selected_folder = Some(result.folder);
         self.refresh_visible_tracks();
+    }
+
+    fn set_all_tracks(&mut self, tracks: Vec<LibraryTrack>) {
+        self.all_tracks = tracks;
+        self.folder_tree = build_folder_tree(&self.all_tracks);
+        self.refresh_library_manager_state();
+        self.refresh_visible_tracks();
+    }
+
+    fn refresh_library_manager_state(&mut self) {
+        if let Some(db) = &self.library {
+            if let Ok(raw_folders) = db.get_raw_folders() {
+                self.library_folders = raw_folders
+                    .into_iter()
+                    .map(|(id, path, added_at, last_scanned_at)| {
+                        let track_count = self.all_tracks.iter().filter(|t| t.path.starts_with(&path)).count();
+                        let exists_on_disk = path.exists();
+                        LibraryFolder {
+                            id,
+                            path,
+                            added_at,
+                            last_scanned_at,
+                            track_count,
+                            exists_on_disk,
+                        }
+                    })
+                    .collect();
+            }
+        }
+        self.library_stats = compute_library_stats(&self.all_tracks, self.library_folders.len());
     }
 
     fn refresh_visible_tracks(&mut self) {
@@ -1738,9 +2002,8 @@ fn resolve_missing_durations() -> Command<Message> {
                             .ok()
                             .and_then(|info| info.duration)
                             .or_else(|| {
-                                kanono_audio_engine::decode_track(&t.path)
-                                    .ok()
-                                    .and_then(|probed| probed.metadata.duration)
+                                kanono_audio_engine::ffmpeg::probe_file(&t.path)
+                                    .and_then(|m| m.duration)
                             });
                         if let Some(d) = dur {
                             let _ = db.update_duration(t.id, d);

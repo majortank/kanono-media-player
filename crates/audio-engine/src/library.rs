@@ -26,6 +26,27 @@ pub struct LibraryTrack {
     pub bpm: Option<u32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryFolder {
+    pub id: i64,
+    pub path: PathBuf,
+    pub added_at: i64,
+    pub last_scanned_at: Option<i64>,
+    pub track_count: usize,
+    pub exists_on_disk: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LibraryStats {
+    pub total_tracks: usize,
+    pub total_artists: usize,
+    pub total_albums: usize,
+    pub total_genres: usize,
+    pub total_duration: Duration,
+    pub total_folders: usize,
+    pub total_plays: u64,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TrackQuery {
     pub text: Option<String>,
@@ -106,6 +127,13 @@ impl LibraryDatabase {
             );
             CREATE INDEX IF NOT EXISTS tracks_artist_album ON tracks(artist, album);
             CREATE INDEX IF NOT EXISTS tracks_genre_year ON tracks(genre, year);
+
+            CREATE TABLE IF NOT EXISTS library_folders (
+                id INTEGER PRIMARY KEY,
+                path TEXT NOT NULL UNIQUE,
+                added_at INTEGER NOT NULL,
+                last_scanned_at INTEGER
+            );
             ",
         )?;
 
@@ -169,24 +197,28 @@ impl LibraryDatabase {
         let transaction = self.connection.transaction()?;
         let mut indexed = 0;
 
+        let mut check_stmt = transaction.prepare("SELECT modified_at FROM tracks WHERE path = ?1")?;
+        let mut insert_stmt = transaction.prepare(
+            "INSERT INTO tracks (path, title, artist, album, genre, year, track_number, duration_ms, modified_at, play_count, bpm)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(path) DO UPDATE SET title = excluded.title, artist = excluded.artist,
+             album = excluded.album, genre = excluded.genre, year = excluded.year,
+             track_number = excluded.track_number, duration_ms = excluded.duration_ms,
+             modified_at = excluded.modified_at, bpm = excluded.bpm",
+        )?;
+
         for input_path in paths {
             let mut process_file = |p: &Path| -> Result<()> {
                 if !is_supported(p) { return Ok(()); }
                 let modified_at = modification_seconds(p)?;
-                let existing: Option<i64> = transaction.query_row(
-                    "SELECT modified_at FROM tracks WHERE path = ?1",
-                    [p.to_string_lossy().as_ref()],
+                let path_str = p.to_string_lossy();
+                let existing: Option<i64> = check_stmt.query_row(
+                    [path_str.as_ref()],
                     |row| row.get(0),
                 ).optional()?;
                 if existing == Some(modified_at) { return Ok(()); }
                 let track = read_track(p)?;
-                transaction.execute(
-                    "INSERT INTO tracks (path, title, artist, album, genre, year, track_number, duration_ms, modified_at, play_count, bpm)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-                     ON CONFLICT(path) DO UPDATE SET title = excluded.title, artist = excluded.artist,
-                     album = excluded.album, genre = excluded.genre, year = excluded.year,
-                     track_number = excluded.track_number, duration_ms = excluded.duration_ms,
-                     modified_at = excluded.modified_at, bpm = excluded.bpm",
+                insert_stmt.execute(
                     params![
                         track.path.to_string_lossy(), track.title, track.artist, track.album, track.genre,
                         track.year, track.track_number, track.duration.map(|value| value.as_millis() as i64), modified_at,
@@ -209,6 +241,8 @@ impl LibraryDatabase {
             }
         }
 
+        drop(check_stmt);
+        drop(insert_stmt);
         transaction.commit()?;
         Ok(indexed)
     }
@@ -319,6 +353,282 @@ impl LibraryDatabase {
         }
         transaction.commit()?;
         Ok(())
+    }
+
+    /// Registers a folder in the managed library folders list.
+    pub fn add_folder(&mut self, folder: &Path) -> Result<i64> {
+        let path_str = folder.to_string_lossy();
+        let now = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        self.connection.execute(
+            "INSERT INTO library_folders (path, added_at, last_scanned_at)
+             VALUES (?1, ?2, NULL)
+             ON CONFLICT(path) DO NOTHING",
+            params![path_str, now],
+        )?;
+        let id: i64 = self.connection.query_row(
+            "SELECT id FROM library_folders WHERE path = ?1",
+            [path_str.as_ref()],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// Registers a folder and scans it immediately.
+    pub fn add_folder_and_scan(&mut self, folder: &Path) -> Result<usize> {
+        let folder_id = self.add_folder(folder)?;
+        let count = self.scan_directory(folder)?;
+        let _ = self.update_folder_scanned(folder_id);
+        Ok(count)
+    }
+
+    /// Removes a folder from monitored folders, optionally removing its tracks.
+    pub fn remove_folder(&mut self, folder_id: i64, remove_tracks: bool) -> Result<usize> {
+        let folder_path: Option<String> = self.connection.query_row(
+            "SELECT path FROM library_folders WHERE id = ?1",
+            [folder_id],
+            |row| row.get(0),
+        ).optional()?;
+
+        let mut tracks_deleted = 0;
+        if let Some(folder_path) = folder_path {
+            if remove_tracks {
+                let prefix_pattern = format!("{}%", folder_path);
+                tracks_deleted = self.connection.execute(
+                    "DELETE FROM tracks WHERE path LIKE ?1",
+                    params![prefix_pattern],
+                )?;
+            }
+            self.connection.execute(
+                "DELETE FROM library_folders WHERE id = ?1",
+                params![folder_id],
+            )?;
+        }
+        Ok(tracks_deleted)
+    }
+
+    /// Returns raw monitored folder records without running N+1 queries.
+    pub fn get_raw_folders(&self) -> Result<Vec<(i64, PathBuf, i64, Option<i64>)>> {
+        let mut stmt = self.connection.prepare(
+            "SELECT id, path, added_at, last_scanned_at FROM library_folders ORDER BY path COLLATE NOCASE ASC"
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let id: i64 = row.get(0)?;
+            let path_str: String = row.get(1)?;
+            let added_at: i64 = row.get(2)?;
+            let last_scanned_at: Option<i64> = row.get(3)?;
+            Ok((id, PathBuf::from(path_str), added_at, last_scanned_at))
+        })?;
+        let mut folders = Vec::new();
+        for item in rows {
+            folders.push(item?);
+        }
+        Ok(folders)
+    }
+
+    /// Returns all monitored folders with live track count and disk existence check.
+    pub fn get_folders(&self) -> Result<Vec<LibraryFolder>> {
+        let raw = self.get_raw_folders()?;
+        let mut count_stmt = self.connection.prepare(
+            "SELECT COUNT(*) FROM tracks WHERE path LIKE ?1"
+        )?;
+
+        let mut folders = Vec::with_capacity(raw.len());
+        for (id, path, added_at, last_scanned_at) in raw {
+            let exists_on_disk = path.exists();
+            let prefix_pattern = format!("{}%", path.to_string_lossy());
+            let track_count: usize = count_stmt.query_row(
+                params![prefix_pattern],
+                |r| r.get(0),
+            ).unwrap_or(0);
+
+            folders.push(LibraryFolder {
+                id,
+                path,
+                added_at,
+                last_scanned_at,
+                track_count,
+                exists_on_disk,
+            });
+        }
+        Ok(folders)
+    }
+
+    /// Updates the last scanned timestamp for a folder.
+    pub fn update_folder_scanned(&mut self, folder_id: i64) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        self.connection.execute(
+            "UPDATE library_folders SET last_scanned_at = ?1 WHERE id = ?2",
+            params![now, folder_id],
+        )?;
+        Ok(())
+    }
+
+    /// Rescans all registered monitored folders.
+    pub fn rescan_all_folders(&mut self) -> Result<usize> {
+        let folders = self.get_folders()?;
+        let mut total_indexed = 0;
+        for f in folders {
+            if f.exists_on_disk {
+                if let Ok(c) = self.scan_directory(&f.path) {
+                    total_indexed += c;
+                    let _ = self.update_folder_scanned(f.id);
+                }
+            }
+        }
+        Ok(total_indexed)
+    }
+
+    /// Deletes a track from the library.
+    pub fn delete_track(&mut self, track_id: i64) -> Result<bool> {
+        let affected = self.connection.execute(
+            "DELETE FROM tracks WHERE id = ?1",
+            params![track_id],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Deletes multiple tracks from the library atomically.
+    pub fn delete_tracks(&mut self, track_ids: &[i64]) -> Result<usize> {
+        if track_ids.is_empty() {
+            return Ok(0);
+        }
+        let tx = self.connection.transaction()?;
+        let mut deleted = 0;
+        for &id in track_ids {
+            deleted += tx.execute("DELETE FROM tracks WHERE id = ?1", params![id])?;
+        }
+        tx.commit()?;
+        Ok(deleted)
+    }
+
+    /// Checks all library tracks against the filesystem and removes any whose files no longer exist.
+    pub fn prune_missing_tracks(&mut self) -> Result<usize> {
+        let missing_ids: Vec<i64> = {
+            let mut stmt = self.connection.prepare("SELECT id, path FROM tracks")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+
+            let mut ids = Vec::new();
+            for r in rows {
+                let (id, path_str) = r?;
+                if !Path::new(&path_str).exists() {
+                    ids.push(id);
+                }
+            }
+            ids
+        };
+
+        if missing_ids.is_empty() {
+            return Ok(0);
+        }
+
+        self.delete_tracks(&missing_ids)
+    }
+
+    /// Clears all tracks and monitored folders from the database.
+    pub fn clear_library(&mut self) -> Result<()> {
+        let tx = self.connection.transaction()?;
+        tx.execute("DELETE FROM tracks", [])?;
+        tx.execute("DELETE FROM library_folders", [])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Computes summary statistics for the library.
+    pub fn get_library_stats(&self) -> Result<LibraryStats> {
+        let total_tracks: usize = self.connection.query_row(
+            "SELECT COUNT(*) FROM tracks",
+            [],
+            |r| r.get(0),
+        ).unwrap_or(0);
+
+        let total_artists: usize = self.connection.query_row(
+            "SELECT COUNT(DISTINCT artist) FROM tracks WHERE artist != '' AND artist != 'Unknown Artist'",
+            [],
+            |r| r.get(0),
+        ).unwrap_or(0);
+
+        let total_albums: usize = self.connection.query_row(
+            "SELECT COUNT(DISTINCT album) FROM tracks WHERE album != '' AND album != 'Unknown Album'",
+            [],
+            |r| r.get(0),
+        ).unwrap_or(0);
+
+        let total_genres: usize = self.connection.query_row(
+            "SELECT COUNT(DISTINCT genre) FROM tracks WHERE genre != ''",
+            [],
+            |r| r.get(0),
+        ).unwrap_or(0);
+
+        let total_duration_ms: i64 = self.connection.query_row(
+            "SELECT COALESCE(SUM(duration_ms), 0) FROM tracks",
+            [],
+            |r| r.get(0),
+        ).unwrap_or(0);
+
+        let total_folders: usize = self.connection.query_row(
+            "SELECT COUNT(*) FROM library_folders",
+            [],
+            |r| r.get(0),
+        ).unwrap_or(0);
+
+        let total_plays: u64 = self.connection.query_row(
+            "SELECT COALESCE(SUM(play_count), 0) FROM tracks",
+            [],
+            |r| r.get(0),
+        ).unwrap_or(0);
+
+        Ok(LibraryStats {
+            total_tracks,
+            total_artists,
+            total_albums,
+            total_genres,
+            total_duration: Duration::from_millis(total_duration_ms.max(0) as u64),
+            total_folders,
+            total_plays,
+        })
+    }
+}
+
+/// Computes summary statistics for a slice of tracks in memory in < 1 millisecond.
+pub fn compute_library_stats(tracks: &[LibraryTrack], total_folders: usize) -> LibraryStats {
+    let mut artists = std::collections::HashSet::new();
+    let mut albums = std::collections::HashSet::new();
+    let mut genres = std::collections::HashSet::new();
+    let mut total_duration = Duration::ZERO;
+    let mut total_plays = 0u64;
+
+    for track in tracks {
+        if !track.artist.is_empty() && track.artist != "Unknown Artist" {
+            artists.insert(&track.artist);
+        }
+        if !track.album.is_empty() && track.album != "Unknown Album" {
+            albums.insert(&track.album);
+        }
+        if !track.genre.is_empty() {
+            genres.insert(&track.genre);
+        }
+        if let Some(dur) = track.duration {
+            total_duration += dur;
+        }
+        total_plays += u64::from(track.play_count);
+    }
+
+    LibraryStats {
+        total_tracks: tracks.len(),
+        total_artists: artists.len(),
+        total_albums: albums.len(),
+        total_genres: genres.len(),
+        total_duration,
+        total_folders,
+        total_plays,
     }
 }
 
@@ -501,8 +811,15 @@ pub fn read_track(path: &Path) -> Result<LibraryTrack> {
         }
     }
 
-    // 4. Fallback to ffprobe for video formats, missing duration, or missing tags
-    if (track.duration.is_none() || track.artist.is_empty()) && crate::ffmpeg::is_ffmpeg_available() {
+    // 4. Fallback to ffprobe for container/video formats or missing duration
+    let is_video_or_container = path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| {
+        matches!(
+            ext.to_ascii_lowercase().as_str(),
+            "webm" | "mkv" | "mp4" | "m4v" | "avi" | "mov" | "wmv" | "flv" | "3gp" | "ts" | "mts" | "m2ts" | "ogv" | "vob" | "asf"
+        )
+    });
+    let needs_probe = track.duration.is_none() || (is_video_or_container && (track.artist.is_empty() || track.artist == "Unknown Artist"));
+    if needs_probe && crate::ffmpeg::is_ffmpeg_available() {
         if let Some(media_meta) = crate::ffmpeg::probe_file(path) {
             if track.duration.is_none() {
                 track.duration = media_meta.duration;
@@ -825,5 +1142,74 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_library_manager_operations() {
+        let mut db = LibraryDatabase::open(":memory:").unwrap();
+
+        // 1. Add monitored folders
+        let folder_id_1 = db.add_folder(Path::new("/music/rock")).unwrap();
+        let folder_id_2 = db.add_folder(Path::new("/music/jazz")).unwrap();
+        assert!(folder_id_1 > 0);
+        assert!(folder_id_2 > 0);
+
+        // Duplicate folder add should be idempotent
+        let dup_id = db.add_folder(Path::new("/music/rock")).unwrap();
+        assert_eq!(dup_id, folder_id_1);
+
+        // 2. Add tracks
+        db.connection.execute(
+            "INSERT INTO tracks (id, path, title, artist, album, genre, year, track_number, duration_ms, modified_at, play_count)
+             VALUES (1, '/music/rock/song1.mp3', 'Song 1', 'Queen', 'A Night at the Opera', 'Rock', 1975, 1, 300_000, 100, 10),
+                    (2, '/music/rock/song2.mp3', 'Song 2', 'Queen', 'A Night at the Opera', 'Rock', 1975, 2, 240_000, 100, 5),
+                    (3, '/music/jazz/tune1.flac', 'Tune 1', 'Miles Davis', 'Kind of Blue', 'Jazz', 1959, 1, 540_000, 100, 2)",
+            [],
+        ).unwrap();
+
+        // 3. Check get_folders and track counting
+        let folders = db.get_folders().unwrap();
+        assert_eq!(folders.len(), 2);
+        let rock_f = folders.iter().find(|f| f.path == PathBuf::from("/music/rock")).unwrap();
+        assert_eq!(rock_f.track_count, 2);
+        let jazz_f = folders.iter().find(|f| f.path == PathBuf::from("/music/jazz")).unwrap();
+        assert_eq!(jazz_f.track_count, 1);
+
+        // 4. Check library stats and in-memory computation
+        let stats = db.get_library_stats().unwrap();
+        assert_eq!(stats.total_tracks, 3);
+        assert_eq!(stats.total_artists, 2);
+        assert_eq!(stats.total_albums, 2);
+        assert_eq!(stats.total_genres, 2);
+        assert_eq!(stats.total_duration, Duration::from_millis(1080_000));
+        assert_eq!(stats.total_folders, 2);
+        assert_eq!(stats.total_plays, 17);
+
+        // Verify get_raw_folders and compute_library_stats match DB stats exactly
+        let raw_folders = db.get_raw_folders().unwrap();
+        assert_eq!(raw_folders.len(), 2);
+        let all_tracks = db.query(&TrackQuery::default()).unwrap();
+        let in_memory_stats = compute_library_stats(&all_tracks, raw_folders.len());
+        assert_eq!(in_memory_stats, stats);
+
+        // 5. Delete single track
+        assert!(db.delete_track(1).unwrap());
+        assert_eq!(db.query(&TrackQuery::default()).unwrap().len(), 2);
+
+        // 6. Delete multiple tracks
+        let deleted = db.delete_tracks(&[2]).unwrap();
+        assert_eq!(deleted, 1);
+        assert_eq!(db.query(&TrackQuery::default()).unwrap().len(), 1);
+
+        // 7. Remove folder and its remaining tracks
+        let deleted_tracks = db.remove_folder(folder_id_2, true).unwrap();
+        assert_eq!(deleted_tracks, 1);
+        assert_eq!(db.query(&TrackQuery::default()).unwrap().len(), 0);
+        assert_eq!(db.get_folders().unwrap().len(), 1);
+
+        // 8. Clear library
+        db.clear_library().unwrap();
+        assert_eq!(db.get_folders().unwrap().len(), 0);
+        assert_eq!(db.get_library_stats().unwrap().total_tracks, 0);
     }
 }

@@ -8,7 +8,7 @@ use iced::{
     widget::{button, column, container, horizontal_space, pane_grid, row, scrollable, slider, svg, text, text_input},
     Alignment, Color, Element, Length,
 };
-use kanono_audio_engine::{LibraryTrack, ReplayGainResult, TrackMetadata};
+use kanono_audio_engine::{LibraryFolder, LibraryStats, LibraryTrack, ReplayGainResult, TrackMetadata};
 
 use crate::{
     plugins::RegisteredPlugin, BatchEditState, BatchField, BpmFilter, DurationFilter,
@@ -37,6 +37,10 @@ const ICON_CHEVRON_DOWN_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg
 const ICON_CHECK_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#10b981"><polygon points="9,16.2 4.8,12 3.4,13.4 9,19 21,7 19.6,5.6"/></svg>"##;
 const ICON_FILTER_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#94a3b8"><path d="M10 18h4v-2h-4v2zM3 6v2h18V6H3zm3 7h12v-2H6v2z"/></svg>"##;
 const ICON_CLEAR_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#cbd5e1"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12 19 6.41z"/></svg>"##;
+const ICON_MANAGER_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#94a3b8"><path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-1 9H9V9h10v2zm-4 4H9v-2h6v2zm4-8H9V5h10v2z"/></svg>"##;
+const ICON_REFRESH_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#cbd5e1"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>"##;
+const ICON_TRASH_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#ef4444"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>"##;
+const ICON_BROOM_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#38bdf8"><path d="M19.36 2.72l1.42 1.42-7.07 7.07 1.41 1.41-1.41 1.42-2.83-2.83 1.41-1.42 1.42 1.42 7.07-7.07zM5.5 17.5l4-4 1.42 1.42-4 4H5.5v-1.42zm-2 2v2h2l6.5-6.5-2-2L3.5 19.5z"/></svg>"##;
 
 fn svg_icon<'a, M: 'a>(data: &'static [u8], size: f32) -> Element<'a, M> {
     svg(svg::Handle::from_memory(data))
@@ -73,6 +77,11 @@ pub struct ViewProps<'a> {
     pub current_track_gain: Option<ReplayGainResult>,
     pub editing_track: Option<&'a EditingTrackState>,
     pub components: &'a [RegisteredPlugin],
+    pub library_folders: &'a [LibraryFolder],
+    pub library_stats: &'a LibraryStats,
+    pub is_scanning: bool,
+    pub confirm_clear_library: bool,
+    pub folder_tree: &'a [FolderTreeNode],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -141,6 +150,18 @@ pub fn player_view<'a>(props: ViewProps<'a>, panes: &'a pane_grid::State<PlayerP
 
         button(
             row![
+                svg_icon(ICON_MANAGER_SVG, 15.0),
+                text("Library Manager").size(13),
+            ]
+            .spacing(6)
+            .align_items(Alignment::Center),
+        )
+        .on_press(Message::SelectTab(NavTab::LibraryManager))
+        .padding([8, 14])
+        .style(if props.current_tab == NavTab::LibraryManager { btn_selected_nav_style() } else { btn_default_style() }),
+
+        button(
+            row![
                 svg_icon(ICON_PLAY_SVG, 13.0),
                 text("Sample Audio").size(13).style(Color::WHITE),
             ]
@@ -175,6 +196,7 @@ pub fn player_view<'a>(props: ViewProps<'a>, panes: &'a pane_grid::State<PlayerP
             PlayerPane::Main => match props.current_tab {
                 NavTab::Library | NavTab::Folders | NavTab::MostPlayed => render_track_list(&props),
                 NavTab::Queue => render_queue_list(&props),
+                NavTab::LibraryManager => render_library_manager(&props),
                 NavTab::Info => render_info_view(&props),
             },
         })
@@ -245,6 +267,21 @@ fn render_sidebar<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
     .width(Length::Fill)
     .padding([8, 12])
     .style(if is_queue_active { btn_selected_nav_style() } else { btn_nav_style() });
+
+    let is_manager_active = props.current_tab == NavTab::LibraryManager;
+    let manager_btn = button(
+        row![
+            svg_icon(ICON_MANAGER_SVG, 16.0),
+            text("Library Manager").size(14).width(Length::Fill),
+            text(format!("{} folders", props.library_folders.len())).size(11).style(Color::from_rgb8(148, 163, 184)),
+        ]
+        .spacing(8)
+        .align_items(Alignment::Center),
+    )
+    .on_press(Message::SelectTab(NavTab::LibraryManager))
+    .width(Length::Fill)
+    .padding([8, 12])
+    .style(if is_manager_active { btn_selected_nav_style() } else { btn_nav_style() });
 
     let is_info_active = props.current_tab == NavTab::Info;
     let info_btn = button(
@@ -447,12 +484,12 @@ fn render_sidebar<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
             .into()
         }
         FilterCategory::All | FilterCategory::Folders => {
-            let tree = build_folder_tree(props.all_tracks);
+            let tree = props.folder_tree;
             if tree.is_empty() {
                 column![text("No folders loaded").size(12).style(Color::from_rgb8(148, 163, 184))].into()
             } else {
                 let mut folder_col = column![].spacing(2);
-                for node in &tree {
+                for node in tree {
                     folder_col = folder_col.push(render_folder_tree_node(node, 0, props));
                 }
                 folder_col.into()
@@ -507,6 +544,7 @@ fn render_sidebar<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
         lib_btn,
         most_played_btn,
         queue_btn,
+        manager_btn,
         info_btn,
         text("FILTER BY").size(11).style(Color::from_rgb8(100, 116, 139)),
         cat_chips_1,
@@ -522,13 +560,13 @@ fn render_sidebar<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
 
     // If active category is not Folders or All, also show hierarchical Folders section at bottom
     if props.filter_state.active_category != FilterCategory::Folders && props.filter_state.active_category != FilterCategory::All {
-        let tree = build_folder_tree(props.all_tracks);
+        let tree = props.folder_tree;
         if !tree.is_empty() {
             let mut folder_col = column![
                 text("FOLDERS").size(11).style(Color::from_rgb8(100, 116, 139)),
             ]
             .spacing(4);
-            for node in &tree {
+            for node in tree {
                 folder_col = folder_col.push(render_folder_tree_node(node, 0, props));
             }
             sidebar_content = sidebar_content.push(folder_col);
@@ -783,6 +821,15 @@ fn render_track_list<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
                     .style(btn_accent_style()),
 
                     button(
+                        row![svg_icon(ICON_TRASH_SVG, 12.0), text("Remove from Library").size(12).style(Color::from_rgb8(248, 113, 113))]
+                            .spacing(4)
+                            .align_items(Alignment::Center),
+                    )
+                    .on_press(Message::RemoveSelectedTracksFromLibrary)
+                    .padding([5, 10])
+                    .style(btn_default_style()),
+
+                    button(
                         row![
                             svg_icon(ICON_CLEAR_SVG, 11.0),
                             text("Deselect").size(12),
@@ -830,7 +877,7 @@ fn render_track_list<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
         text("ARTIST").width(Length::FillPortion(3)).style(Color::from_rgb8(100, 116, 139)),
         text("ALBUM").width(Length::FillPortion(3)).style(Color::from_rgb8(100, 116, 139)),
         text("TIME").width(Length::Fixed(60.0)).style(Color::from_rgb8(100, 116, 139)),
-        text("ACTIONS").width(Length::Fixed(120.0)).style(Color::from_rgb8(100, 116, 139)),
+        text("ACTIONS").width(Length::Fixed(150.0)).style(Color::from_rgb8(100, 116, 139)),
     ]
     .spacing(8)
     .padding([6, 10]);
@@ -917,9 +964,13 @@ fn render_track_list<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
                     .on_press(Message::StartEditTrack(track.id))
                     .padding([4, 6])
                     .style(btn_default_style()),
+                button(svg_icon(ICON_CLEAR_SVG, 10.0))
+                    .on_press(Message::RemoveTrackFromLibrary(track.id))
+                    .padding([4, 6])
+                    .style(btn_default_style()),
             ]
             .spacing(4)
-            .width(Length::Fixed(116.0)),
+            .width(Length::Fixed(146.0)),
         ]
         .spacing(8)
         .align_items(Alignment::Center);
@@ -1353,6 +1404,332 @@ fn render_info_view<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
         .into()
 }
 
+fn format_total_duration(d: Duration) -> String {
+    let total_secs = d.as_secs();
+    let hours = total_secs / 3600;
+    let mins = (total_secs % 3600) / 60;
+    if hours > 0 {
+        format!("{}h {}m", hours, mins)
+    } else {
+        format!("{}m", mins)
+    }
+}
+
+fn format_relative_time(secs: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let diff = now.saturating_sub(secs);
+    if diff < 60 {
+        "Just now".to_string()
+    } else if diff < 3600 {
+        format!("{}m ago", diff / 60)
+    } else if diff < 86400 {
+        format!("{}h ago", diff / 3600)
+    } else {
+        format!("{}d ago", diff / 86400)
+    }
+}
+
+fn render_library_manager<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
+    // 1. Header with title and quick actions
+    let mut header_actions = row![
+        button(
+            row![svg_icon(ICON_FOLDER_SVG, 14.0), text("Add Folder").size(13).style(Color::WHITE)]
+                .spacing(6)
+                .align_items(Alignment::Center),
+        )
+        .on_press(Message::ImportFolder)
+        .padding([7, 14])
+        .style(btn_primary_style()),
+
+        button(
+            row![svg_icon(ICON_FILE_SVG, 14.0), text("Add Files").size(13)]
+                .spacing(6)
+                .align_items(Alignment::Center),
+        )
+        .on_press(Message::ImportFiles)
+        .padding([7, 14])
+        .style(btn_default_style()),
+
+        button(
+            row![svg_icon(ICON_REFRESH_SVG, 13.0), text("Rescan All Folders").size(13)]
+                .spacing(6)
+                .align_items(Alignment::Center),
+        )
+        .on_press(Message::RescanAllFolders)
+        .padding([7, 14])
+        .style(btn_default_style()),
+
+        button(
+            row![svg_icon(ICON_BROOM_SVG, 13.0), text("Clean Missing Songs").size(13)]
+                .spacing(6)
+                .align_items(Alignment::Center),
+        )
+        .on_press(Message::PruneMissingTracks)
+        .padding([7, 14])
+        .style(btn_default_style()),
+    ]
+    .spacing(8)
+    .align_items(Alignment::Center);
+
+    if props.is_scanning {
+        header_actions = header_actions.push(
+            container(text("Scanning in progress...").size(12).style(Color::from_rgb8(52, 211, 153)))
+                .padding([6, 10])
+                .style(badge_container_style()),
+        );
+    }
+
+    let header = row![
+        row![
+            svg_icon(ICON_MANAGER_SVG, 22.0),
+            column![
+                text("Music Library Manager").size(20).style(Color::WHITE),
+                text("Manage monitored folders, scan music sources, and maintain your library catalog")
+                    .size(12)
+                    .style(Color::from_rgb8(148, 163, 184)),
+            ]
+            .spacing(2),
+        ]
+        .spacing(8)
+        .align_items(Alignment::Center),
+        horizontal_space(),
+        header_actions,
+    ]
+    .align_items(Alignment::Center);
+
+    // 2. Statistics Overview Cards
+    let stat_card = |label: &'static str, val: String, sub: &'static str| -> Element<'a, Message> {
+        container(
+            column![
+                text(label).size(11).style(Color::from_rgb8(148, 163, 184)),
+                text(val).size(20).style(Color::from_rgb8(52, 211, 153)),
+                text(sub).size(11).style(Color::from_rgb8(100, 116, 139)),
+            ]
+            .spacing(3),
+        )
+        .padding([10, 16])
+        .width(Length::FillPortion(1))
+        .style(card_container_style())
+        .into()
+    };
+
+    let stats_row = row![
+        stat_card("TOTAL TRACKS", format!("{}", props.library_stats.total_tracks), "Indexed in database"),
+        stat_card("TOTAL DURATION", format_total_duration(props.library_stats.total_duration), "Playback time"),
+        stat_card("ARTISTS & ALBUMS", format!("{} / {}", props.library_stats.total_artists, props.library_stats.total_albums), "Artists / Albums"),
+        stat_card("MONITORED FOLDERS", format!("{}", props.library_folders.len()), "Configured paths"),
+        stat_card("TOTAL PLAYS", format!("{}", props.library_stats.total_plays), "Playback count"),
+    ]
+    .spacing(10);
+
+    // 3. Monitored Folders Section
+    let folders_title = row![
+        svg_icon(ICON_FOLDER_SVG, 16.0),
+        text("Monitored Music Folders").size(16).style(Color::from_rgb8(52, 211, 153)),
+        horizontal_space(),
+        text(format!("{} folder(s) registered", props.library_folders.len())).size(12).style(Color::from_rgb8(148, 163, 184)),
+    ]
+    .align_items(Alignment::Center);
+
+    let folders_content: Element<'a, Message> = if props.library_folders.is_empty() {
+        container(
+            column![
+                text("No monitored folders configured yet").size(15).style(Color::WHITE),
+                text("Add music folders to allow Kanono Player to scan audio files and automatically keep your music library updated.")
+                    .size(13)
+                    .style(Color::from_rgb8(148, 163, 184)),
+                button(row![svg_icon(ICON_FOLDER_SVG, 14.0), text("Add First Folder").size(13).style(Color::WHITE)].spacing(6).align_items(Alignment::Center))
+                    .on_press(Message::ImportFolder)
+                    .padding([8, 16])
+                    .style(btn_primary_style()),
+            ]
+            .spacing(10)
+            .align_items(Alignment::Center),
+        )
+        .padding(24)
+        .width(Length::Fill)
+        .align_x(iced::alignment::Horizontal::Center)
+        .style(card_container_style())
+        .into()
+    } else {
+        let mut f_col = column![].spacing(8);
+        for f in props.library_folders {
+            let status_badge: Element<'a, Message> = if f.exists_on_disk {
+                container(text("ACTIVE").size(10).style(Color::from_rgb8(52, 211, 153)))
+                    .padding([3, 7])
+                    .style(badge_container_style())
+                    .into()
+            } else {
+                container(text("NOT FOUND ON DISK").size(10).style(Color::from_rgb8(248, 113, 113)))
+                    .padding([3, 7])
+                    .style(badge_container_style())
+                    .into()
+            };
+
+            let scanned_label = if let Some(ts) = f.last_scanned_at {
+                format!("Last scanned: {}", format_relative_time(ts))
+            } else {
+                "Not scanned yet".to_string()
+            };
+
+            let folder_card = container(
+                row![
+                    svg_icon(ICON_FOLDER_SVG, 22.0),
+                    column![
+                        row![
+                            text(f.path.display().to_string()).size(14).style(Color::WHITE),
+                            status_badge,
+                        ]
+                        .spacing(8)
+                        .align_items(Alignment::Center),
+                        row![
+                            text(format!("{} song(s) indexed", f.track_count)).size(12).style(Color::from_rgb8(148, 163, 184)),
+                            text("•").size(12).style(Color::from_rgb8(100, 116, 139)),
+                            text(scanned_label).size(12).style(Color::from_rgb8(100, 116, 139)),
+                        ]
+                        .spacing(6)
+                        .align_items(Alignment::Center),
+                    ]
+                    .spacing(4)
+                    .width(Length::Fill),
+                    button(
+                        row![svg_icon(ICON_REFRESH_SVG, 11.0), text("Rescan").size(12)]
+                            .spacing(4)
+                            .align_items(Alignment::Center),
+                    )
+                    .on_press(Message::RescanFolder(f.id))
+                    .padding([5, 10])
+                    .style(btn_default_style()),
+                    button(
+                        row![svg_icon(ICON_TRASH_SVG, 11.0), text("Remove & Delete Songs").size(12).style(Color::from_rgb8(248, 113, 113))]
+                            .spacing(4)
+                            .align_items(Alignment::Center),
+                    )
+                    .on_press(Message::RemoveLibraryFolder(f.id, true))
+                    .padding([5, 10])
+                    .style(btn_default_style()),
+                    button(
+                        row![svg_icon(ICON_CLEAR_SVG, 11.0), text("Remove Folder Only").size(12)]
+                            .spacing(4)
+                            .align_items(Alignment::Center),
+                    )
+                    .on_press(Message::RemoveLibraryFolder(f.id, false))
+                    .padding([5, 10])
+                    .style(btn_default_style()),
+                ]
+                .spacing(12)
+                .align_items(Alignment::Center),
+            )
+            .padding([10, 14])
+            .width(Length::Fill)
+            .style(card_container_style());
+
+            f_col = f_col.push(folder_card);
+        }
+        f_col.into()
+    };
+
+    // 4. Maintenance and database cleanup tools
+    let tools_title = row![
+        svg_icon(ICON_INFO_SVG, 16.0),
+        text("Maintenance & Database Tools").size(16).style(Color::from_rgb8(52, 211, 153)),
+    ]
+    .align_items(Alignment::Center);
+
+    let prune_tool = container(
+        row![
+            column![
+                text("Clean Dead / Missing Songs").size(14).style(Color::WHITE),
+                text("Verify database tracks against local storage. Deletes catalog entries for files that were renamed, deleted, or moved on disk.")
+                    .size(12)
+                    .style(Color::from_rgb8(148, 163, 184)),
+            ]
+            .spacing(2)
+            .width(Length::Fill),
+            button(
+                row![svg_icon(ICON_BROOM_SVG, 13.0), text("Clean Missing Songs").size(12)]
+                    .spacing(6)
+                    .align_items(Alignment::Center),
+            )
+            .on_press(Message::PruneMissingTracks)
+            .padding([8, 14])
+            .style(btn_default_style()),
+        ]
+        .spacing(12)
+        .align_items(Alignment::Center),
+    )
+    .padding([12, 16])
+    .width(Length::Fill)
+    .style(card_container_style());
+
+    let clear_tool_action: Element<'a, Message> = if props.confirm_clear_library {
+        row![
+            text("Are you sure?").size(12).style(Color::from_rgb8(248, 113, 113)),
+            button(text("Yes, Empty Library").size(12).style(Color::WHITE))
+                .on_press(Message::ConfirmClearLibrary)
+                .padding([6, 12])
+                .style(btn_danger_style()),
+            button(text("Cancel").size(12))
+                .on_press(Message::CancelClearLibrary)
+                .padding([6, 12])
+                .style(btn_default_style()),
+        ]
+        .spacing(6)
+        .align_items(Alignment::Center)
+        .into()
+    } else {
+        button(
+            row![svg_icon(ICON_TRASH_SVG, 12.0), text("Clear Entire Library").size(12).style(Color::from_rgb8(248, 113, 113))]
+                .spacing(6)
+                .align_items(Alignment::Center),
+        )
+        .on_press(Message::PromptClearLibrary)
+        .padding([8, 14])
+        .style(btn_default_style())
+        .into()
+    };
+
+    let clear_tool = container(
+        row![
+            column![
+                text("Clear Entire Library Database").size(14).style(Color::WHITE),
+                text("Resets the music catalog by wiping all indexed songs and monitored folders from the local database. Files on disk will NOT be touched.")
+                    .size(12)
+                    .style(Color::from_rgb8(148, 163, 184)),
+            ]
+            .spacing(2)
+            .width(Length::Fill),
+            clear_tool_action,
+        ]
+        .spacing(12)
+        .align_items(Alignment::Center),
+    )
+    .padding([12, 16])
+    .width(Length::Fill)
+    .style(card_container_style());
+
+    let content = column![
+        header,
+        stats_row,
+        folders_title,
+        folders_content,
+        tools_title,
+        prune_tool,
+        clear_tool,
+    ]
+    .spacing(16);
+
+    container(scrollable(content).height(Length::Fill))
+        .padding(14)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(panel_container_style())
+        .into()
+}
+
 fn render_visualizer<'a>(pcm: &'a [f32], is_playing: bool) -> Element<'a, Message> {
     const NUM_BARS: usize = 28;
     const MAX_HEIGHT: f32 = 22.0;
@@ -1628,9 +2005,12 @@ pub fn build_folder_tree(tracks: &[LibraryTrack]) -> Vec<FolderTreeNode> {
     }
 
     let mut total_counts: HashMap<PathBuf, usize> = HashMap::new();
-    for dir in &all_dirs {
-        let count = tracks.iter().filter(|t| t.path.starts_with(dir)).count();
-        total_counts.insert(dir.clone(), count);
+    for track in tracks {
+        let mut curr = track.path.parent();
+        while let Some(dir) = curr {
+            *total_counts.entry(dir.to_path_buf()).or_insert(0) += 1;
+            curr = dir.parent();
+        }
     }
 
     let mut children_map: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
@@ -2354,6 +2734,41 @@ impl iced::widget::button::StyleSheet for ChipInactiveButtonStyle {
                 color: Color::from_rgb8(71, 85, 105),
                 width: 1.0,
                 radius: 12.0.into(),
+            },
+            shadow_offset: iced::Vector::default(),
+            shadow: iced::Shadow::default(),
+        }
+    }
+}
+
+fn btn_danger_style() -> iced::theme::Button {
+    iced::theme::Button::Custom(Box::new(DangerButtonStyle))
+}
+
+struct DangerButtonStyle;
+impl iced::widget::button::StyleSheet for DangerButtonStyle {
+    type Style = iced::Theme;
+    fn active(&self, _style: &Self::Style) -> iced::widget::button::Appearance {
+        iced::widget::button::Appearance {
+            background: Some(Color::from_rgb8(220, 38, 38).into()),
+            text_color: Color::WHITE,
+            border: iced::Border {
+                color: Color::from_rgb8(248, 113, 113),
+                width: 1.0,
+                radius: 6.0.into(),
+            },
+            shadow_offset: iced::Vector::default(),
+            shadow: iced::Shadow::default(),
+        }
+    }
+    fn hovered(&self, _style: &Self::Style) -> iced::widget::button::Appearance {
+        iced::widget::button::Appearance {
+            background: Some(Color::from_rgb8(185, 28, 28).into()),
+            text_color: Color::WHITE,
+            border: iced::Border {
+                color: Color::from_rgb8(252, 165, 165),
+                width: 1.0,
+                radius: 6.0.into(),
             },
             shadow_offset: iced::Vector::default(),
             shadow: iced::Shadow::default(),
