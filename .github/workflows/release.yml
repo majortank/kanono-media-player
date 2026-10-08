@@ -4,6 +4,11 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag (e.g. v1.0.0)"
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -25,9 +30,15 @@ jobs:
           install -m644 resources/kanono-media-player.desktop dist/kanono-media-player-linux-x64/usr/share/applications/kanono-media-player.desktop
           install -m644 assets/icons/hicolor/scalable/apps/kanono-media-player.svg dist/kanono-media-player-linux-x64/usr/share/icons/hicolor/scalable/apps/kanono-media-player.svg
           tar -C dist -czf dist/kanono-media-player-linux-x64.tar.gz kanono-media-player-linux-x64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kanono-media-player-linux-x64
+          path: dist/kanono-media-player-linux-x64.tar.gz
       - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || (inputs.tag_name != null && inputs.tag_name != '')
         with:
           files: dist/kanono-media-player-linux-x64.tar.gz
+          tag_name: ${{ inputs.tag_name || github.ref_name }}
 
   windows:
     runs-on: windows-latest
@@ -41,10 +52,16 @@ jobs:
       - uses: Minionguyjpro/Inno-Setup-Action@v1.2.5
         with:
           path: packaging/windows/kanono-media-player.iss
-          options: /DAppVersion=${{ github.ref_name }}
+          options: /DAppVersion=${{ inputs.tag_name || github.ref_name }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kanono-media-player-windows-x64-setup
+          path: dist/kanono-media-player-windows-x64-setup.exe
       - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || (inputs.tag_name != null && inputs.tag_name != '')
         with:
           files: dist/kanono-media-player-windows-x64-setup.exe
+          tag_name: ${{ inputs.tag_name || github.ref_name }}
 
   macos:
     strategy:
@@ -53,7 +70,7 @@ jobs:
           - runner: macos-14
             target: aarch64-apple-darwin
             architecture: arm64
-          - runner: macos-13
+          - runner: macos-14
             target: x86_64-apple-darwin
             architecture: x64
     runs-on: ${{ matrix.runner }}
@@ -70,6 +87,12 @@ jobs:
           install -m755 target/${{ matrix.target }}/release/kanono-player "dist/Kanono Media Player.app/Contents/MacOS/kanono-player"
           install -m644 packaging/macos/Info.plist "dist/Kanono Media Player.app/Contents/Info.plist"
           hdiutil create -volname "Kanono Media Player" -srcfolder "dist/Kanono Media Player.app" -ov -format UDZO dist/kanono-media-player-macos-${{ matrix.architecture }}.dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kanono-media-player-macos-${{ matrix.architecture }}
+          path: dist/kanono-media-player-macos-${{ matrix.architecture }}.dmg
       - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || (inputs.tag_name != null && inputs.tag_name != '')
         with:
           files: dist/kanono-media-player-macos-${{ matrix.architecture }}.dmg
+          tag_name: ${{ inputs.tag_name || github.ref_name }}

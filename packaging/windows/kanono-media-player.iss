@@ -14,14 +14,14 @@ AppPublisherURL={#AppURL}
 DefaultDirName={autopf}\Kanono Media Player
 DefaultGroupName={#AppName}
 UninstallDisplayIcon={app}\kanono-player.exe
-OutputDir=dist
+OutputDir=..\..\dist
 OutputBaseFilename=kanono-media-player-windows-x64-setup
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
 
 [Files]
-Source: "target\x86_64-pc-windows-msvc\release\kanono-player.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\target\x86_64-pc-windows-msvc\release\kanono-player.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\Kanono Media Player"; Filename: "{app}\kanono-player.exe"
