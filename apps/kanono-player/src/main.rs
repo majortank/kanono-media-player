@@ -5,6 +5,10 @@ mod mpris;
 #[cfg(not(target_os = "linux"))]
 #[path = "mpris_stub.rs"]
 mod mpris;
+#[cfg(target_os = "linux")]
+mod notifications;
+#[cfg(target_os = "linux")]
+mod tray;
 mod plugins;
 mod theme;
 mod ui;
@@ -23,7 +27,7 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, Sender};
-use iced::{executor, time, widget::pane_grid, Application, Command, Element, Subscription, Theme};
+use iced::{executor, time, widget::pane_grid, window, Application, Command, Element, Subscription, Theme};
 use kanono_audio_engine::{
     compute_library_stats, decode_track_streaming, generate_stereo_channel_test, generate_test_tone,
     get_audio_device_info, playback_state_channel, AudioDeviceInfo, AudioOutput, LatencyProfile,
@@ -45,6 +49,18 @@ fn load_app_icon() -> Option<iced::window::Icon> {
 }
 
 fn main() -> iced::Result {
+    #[cfg(target_os = "linux")]
+    {
+        let instance = single_instance::SingleInstance::new("kanono-media-player")
+            .expect("failed to create single-instance guard");
+        if !instance.is_single() {
+            MprisService::raise_existing();
+            return Ok(());
+        }
+        std::mem::forget(instance);
+        tray::spawn();
+    }
+
     let mut settings = iced::Settings::default();
     settings.window.size = iced::Size::new(1060.0, 720.0);
     settings.window.min_size = Some(iced::Size::new(800.0, 560.0));
@@ -527,7 +543,7 @@ impl Application for KanonoApp {
                 }
                 self.apply_playback_updates();
             }
-            Message::PollMpris => self.apply_mpris_commands(),
+            Message::PollMpris => return self.apply_mpris_commands(),
             Message::ImportFolder => return Command::perform(pick_music_folder(), Message::FolderPicked),
             Message::FolderPicked(folder) => {
                 if let Some(folder) = folder {
@@ -1790,8 +1806,9 @@ impl KanonoApp {
         }
     }
 
-    fn apply_mpris_commands(&mut self) {
+    fn apply_mpris_commands(&mut self) -> Command<Message> {
         let commands: Vec<_> = self.mpris_commands.try_iter().collect();
+        let mut raise = false;
         for command in commands {
             match command {
                 MprisCommand::Play => self.resume_playback(),
@@ -1799,8 +1816,16 @@ impl KanonoApp {
                 MprisCommand::Stop => self.stop_playback(),
                 MprisCommand::Next => self.play_next(),
                 MprisCommand::Previous => self.play_previous(),
+                MprisCommand::Raise => raise = true,
             }
         }
+        if raise {
+            return Command::batch([
+                window::minimize(window::Id::MAIN, false),
+                window::gain_focus(window::Id::MAIN),
+            ]);
+        }
+        Command::none()
     }
 
     fn apply_index_result(&mut self, result: IndexResult) {
@@ -1919,6 +1944,12 @@ impl KanonoApp {
         self.mpris_state.set_metadata(self.playback.metadata.clone());
         self.mpris_state.set_playing(true);
         self.playback_sender.publish_track(self.playback.metadata.clone());
+        #[cfg(target_os = "linux")]
+        notifications::track_started(
+            &self.playback.metadata.title,
+            &self.playback.metadata.artist,
+            &self.playback.metadata.album,
+        );
 
         if self.audio_output.is_none() {
             if let Ok(output) = AudioOutput::open_default(self.playback_sender.clone()) {

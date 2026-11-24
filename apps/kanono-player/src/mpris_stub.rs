@@ -9,6 +9,7 @@ pub enum MprisCommand {
     Stop,
     Next,
     Previous,
+    Raise,
 }
 
 #[derive(Clone, Default)]

@@ -10,6 +10,7 @@ pub enum MprisCommand {
     Stop,
     Next,
     Previous,
+    Raise,
 }
 
 #[derive(Clone, Default)]
@@ -42,6 +43,19 @@ pub struct MprisService {
 }
 
 impl MprisService {
+    pub fn raise_existing() {
+        let Ok(connection) = zbus::blocking::Connection::session() else {
+            return;
+        };
+        let _ = connection.call_method(
+            Some("org.mpris.MediaPlayer2.kanono"),
+            "/org/mpris/MediaPlayer2",
+            Some("org.mpris.MediaPlayer2"),
+            "Raise",
+            &(),
+        );
+    }
+
     pub fn spawn() -> Self {
         let (sender, commands) = bounded(16);
         let state = MprisState::default();
@@ -58,7 +72,7 @@ impl MprisService {
                 eprintln!("MPRIS name unavailable: {error}");
                 return;
             }
-            let root = MprisRoot;
+            let root = MprisRoot { commands: sender.clone() };
             let player = MprisPlayer { commands: sender, state: service_state };
             let object_server = connection.object_server();
             if let Err(error) = object_server.at("/org/mpris/MediaPlayer2", root)
@@ -72,7 +86,9 @@ impl MprisService {
     }
 }
 
-struct MprisRoot;
+struct MprisRoot {
+    commands: Sender<MprisCommand>,
+}
 
 struct MprisPlayer {
     commands: Sender<MprisCommand>,
@@ -81,11 +97,15 @@ struct MprisPlayer {
 
 #[zbus::interface(name = "org.mpris.MediaPlayer2")]
 impl MprisRoot {
+    fn raise(&self) {
+        let _ = self.commands.try_send(MprisCommand::Raise);
+    }
+
     #[zbus(property)]
     fn can_quit(&self) -> bool { false }
 
     #[zbus(property)]
-    fn can_raise(&self) -> bool { false }
+    fn can_raise(&self) -> bool { true }
 
     #[zbus(property)]
     fn has_track_list(&self) -> bool { false }

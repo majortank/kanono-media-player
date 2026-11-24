@@ -16,6 +16,9 @@ kanono-audio-engine = { path = "../../crates/audio-engine" }
 kanono-plugin-api = { path = "../../crates/plugin-api" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3.7", features = ["blocking"] }
+notify-rust = { version = "4.19.0", default-features = false, features = ["z"] }
+single-instance = "0.3.3"
 zbus.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]
