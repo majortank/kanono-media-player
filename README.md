@@ -31,10 +31,10 @@ Download precompiled standalone binaries and installers for your operating syste
 
 | Platform | Package | Architecture | Direct Download |
 | :--- | :--- | :--- | :--- |
-| **Windows** | Inno Setup Installer (`.exe`) | x64 (64-bit) | [**⬇️ Download for Windows (x64)**](https://github.com/majortank/kanono-media-player/releases/latest/download/kanono-media-player-windows-x64-setup.exe) |
-| **macOS** | Disk Image (`.dmg`) | Apple Silicon (`arm64` - M1/M2/M3/M4) | [**⬇️ Download for macOS (Apple Silicon)**](https://github.com/majortank/kanono-media-player/releases/latest/download/kanono-media-player-macos-arm64.dmg) |
-| **macOS** | Disk Image (`.dmg`) | Intel (`x64`) | [**⬇️ Download for macOS (Intel)**](https://github.com/majortank/kanono-media-player/releases/latest/download/kanono-media-player-macos-x64.dmg) |
-| **Linux** | Portable Archive (`.tar.gz`) | x86_64 | [**⬇️ Download for Linux (x64)**](https://github.com/majortank/kanono-media-player/releases/latest/download/kanono-media-player-linux-x64.tar.gz) |
+| **Windows** | Inno Setup Installer (`.exe`) | x64 (64-bit) | [**⬇️ Download for Windows (x64)**](https://github.com/majortank/kanono-media-player/releases/download/v1.1.0/kanono-media-player-windows-x64-setup.exe) |
+| **macOS** | Disk Image (`.dmg`) | Apple Silicon (`arm64` - M1/M2/M3/M4) | [**⬇️ Download for macOS (Apple Silicon)**](https://github.com/majortank/kanono-media-player/releases/download/v1.1.0/kanono-media-player-macos-arm64.dmg) |
+| **macOS** | Disk Image (`.dmg`) | Intel (`x64`) | [**⬇️ Download for macOS (Intel)**](https://github.com/majortank/kanono-media-player/releases/download/v1.1.0/kanono-media-player-macos-x64.dmg) |
+| **Linux** | Portable Archive (`.tar.gz`) | x86_64 | [**⬇️ Download for Linux (x64)**](https://github.com/majortank/kanono-media-player/releases/download/v1.1.0/kanono-media-player-linux-x64.tar.gz) |
 
 > [!TIP]
 > View all version tags, changelogs, and checksums on the [GitHub Releases page](https://github.com/majortank/kanono-media-player/releases).
@@ -350,10 +350,10 @@ cargo flamegraph --profile profiling --bin kanono-player
 
 Automated GitHub Actions workflows package native binaries on every release. You can download them directly:
 
-- **Windows**: [`kanono-media-player-windows-x64-setup.exe`](https://github.com/majortank/kanono-media-player/releases/latest/download/kanono-media-player-windows-x64-setup.exe) (Inno Setup installer with Start Menu & Desktop shortcuts).
-- **macOS (Apple Silicon)**: [`kanono-media-player-macos-arm64.dmg`](https://github.com/majortank/kanono-media-player/releases/latest/download/kanono-media-player-macos-arm64.dmg) (Apple Silicon M1/M2/M3/M4 disk image).
-- **macOS (Intel)**: [`kanono-media-player-macos-x64.dmg`](https://github.com/majortank/kanono-media-player/releases/latest/download/kanono-media-player-macos-x64.dmg) (Intel 64-bit disk image).
-- **Linux**: [`kanono-media-player-linux-x64.tar.gz`](https://github.com/majortank/kanono-media-player/releases/latest/download/kanono-media-player-linux-x64.tar.gz) (precompiled binary, `.desktop` launcher, and scalable icons).
+- **Windows**: [`kanono-media-player-windows-x64-setup.exe`](https://github.com/majortank/kanono-media-player/releases/download/v1.1.0/kanono-media-player-windows-x64-setup.exe) (Inno Setup installer with Start Menu & Desktop shortcuts).
+- **macOS (Apple Silicon)**: [`kanono-media-player-macos-arm64.dmg`](https://github.com/majortank/kanono-media-player/releases/download/v1.1.0/kanono-media-player-macos-arm64.dmg) (Apple Silicon M1/M2/M3/M4 disk image).
+- **macOS (Intel)**: [`kanono-media-player-macos-x64.dmg`](https://github.com/majortank/kanono-media-player/releases/download/v1.1.0/kanono-media-player-macos-x64.dmg) (Intel 64-bit disk image).
+- **Linux**: [`kanono-media-player-linux-x64.tar.gz`](https://github.com/majortank/kanono-media-player/releases/download/v1.1.0/kanono-media-player-linux-x64.tar.gz) (precompiled binary, `.desktop` launcher, and scalable icons).
 - **Arch Linux**: [PKGBUILD](PKGBUILD) included in repository root for AUR packaging.
 
 ---
