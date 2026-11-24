@@ -9,6 +9,7 @@ pub enum MprisCommand {
     Stop,
     Next,
     Previous,
+    Seek(i64),
     Raise,
 }
 

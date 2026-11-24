@@ -10,6 +10,7 @@ pub enum MprisCommand {
     Stop,
     Next,
     Previous,
+    Seek(i64),
     Raise,
 }
 
@@ -43,6 +44,19 @@ pub struct MprisService {
 }
 
 impl MprisService {
+    fn call_player_unit(method: &str) {
+        let Ok(connection) = zbus::blocking::Connection::session() else {
+            return;
+        };
+        let _ = connection.call_method(
+            Some("org.mpris.MediaPlayer2.kanono"),
+            "/org/mpris/MediaPlayer2",
+            Some("org.mpris.MediaPlayer2.Player"),
+            method,
+            &(),
+        );
+    }
+
     pub fn raise_existing() {
         let Ok(connection) = zbus::blocking::Connection::session() else {
             return;
@@ -53,6 +67,31 @@ impl MprisService {
             Some("org.mpris.MediaPlayer2"),
             "Raise",
             &(),
+        );
+    }
+
+    pub fn play_pause_existing() {
+        Self::call_player_unit("PlayPause");
+    }
+
+    pub fn next_existing() {
+        Self::call_player_unit("Next");
+    }
+
+    pub fn previous_existing() {
+        Self::call_player_unit("Previous");
+    }
+
+    pub fn seek_existing(offset_micros: i64) {
+        let Ok(connection) = zbus::blocking::Connection::session() else {
+            return;
+        };
+        let _ = connection.call_method(
+            Some("org.mpris.MediaPlayer2.kanono"),
+            "/org/mpris/MediaPlayer2",
+            Some("org.mpris.MediaPlayer2.Player"),
+            "Seek",
+            &offset_micros,
         );
     }
 
@@ -150,6 +189,7 @@ impl MprisPlayer {
     }
     fn stop(&self) { self.send(MprisCommand::Stop); }
     fn play(&self) { self.send(MprisCommand::Play); }
+    fn seek(&self, offset: i64) { self.send(MprisCommand::Seek(offset)); }
 
     #[zbus(property)]
     fn playback_status(&self) -> &str {
@@ -190,6 +230,9 @@ impl MprisPlayer {
 
     #[zbus(property)]
     fn can_control(&self) -> bool { true }
+
+    #[zbus(property)]
+    fn can_seek(&self) -> bool { true }
 }
 
 impl MprisPlayer {

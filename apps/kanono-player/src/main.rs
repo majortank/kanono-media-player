@@ -20,7 +20,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     thread,
     time::Duration,
@@ -64,6 +64,7 @@ fn main() -> iced::Result {
     let mut settings = iced::Settings::default();
     settings.window.size = iced::Size::new(1060.0, 720.0);
     settings.window.min_size = Some(iced::Size::new(800.0, 560.0));
+    settings.window.platform_specific.application_id = "kanono-media-player".into();
     settings.window.icon = load_app_icon();
     KanonoApp::run(settings)
 }
@@ -255,6 +256,7 @@ pub struct KanonoApp {
     playback_receiver: PlaybackStateReceiver,
     audio_output: Option<AudioOutput>,
     playback_generation: Arc<AtomicU64>,
+    audio_push_generation: Arc<AtomicU64>,
     mpris_commands: crossbeam_channel::Receiver<MprisCommand>,
     mpris_state: MprisState,
     components: PluginRegistry,
@@ -289,6 +291,7 @@ pub struct KanonoApp {
     replaygain_worker: Arc<ReplayGainWorker>,
     editing_track: Option<EditingTrackState>,
     current_track_samples: Option<Arc<Vec<f32>>>,
+    streaming_track_samples: Option<Arc<Mutex<Vec<f32>>>>,
     status_message: Option<String>,
     played_tracked_for_current: bool,
     library_folders: Vec<LibraryFolder>,
@@ -457,6 +460,7 @@ impl Application for KanonoApp {
             playback_receiver,
             audio_output,
             playback_generation: Arc::new(AtomicU64::new(0)),
+            audio_push_generation: Arc::new(AtomicU64::new(0)),
             mpris_commands: mpris.commands,
             mpris_state: mpris.state,
             components,
@@ -491,6 +495,7 @@ impl Application for KanonoApp {
             replaygain_worker,
             editing_track: None,
             current_track_samples: None,
+            streaming_track_samples: None,
             status_message: None,
             played_tracked_for_current: false,
             library_folders,
@@ -1637,6 +1642,7 @@ impl KanonoApp {
                     let _ = db.update_duration(track_id, exact_duration);
                 }
                 self.current_track_samples = Some(Arc::clone(&samples));
+                self.streaming_track_samples = None;
                 self.playback.metadata.duration = Some(exact_duration);
                 self.mpris_state.set_metadata(self.playback.metadata.clone());
                 self.playback_sender.publish_track(self.playback.metadata.clone());
@@ -1816,6 +1822,7 @@ impl KanonoApp {
                 MprisCommand::Stop => self.stop_playback(),
                 MprisCommand::Next => self.play_next(),
                 MprisCommand::Previous => self.play_previous(),
+                MprisCommand::Seek(offset_micros) => self.seek_by_micros(offset_micros),
                 MprisCommand::Raise => raise = true,
             }
         }
@@ -1967,6 +1974,8 @@ impl KanonoApp {
 
                 self.playback.metadata = preloaded.metadata;
                 self.current_track_samples = Some(Arc::clone(&preloaded.samples));
+                self.streaming_track_samples = None;
+                let push_generation = self.audio_push_generation.fetch_add(1, Ordering::SeqCst) + 1;
 
                 if let Some(output) = &self.audio_output {
                     output.queue.clear();
@@ -1976,9 +1985,11 @@ impl KanonoApp {
 
                     let queue = output.queue.clone();
                     let samples_arc = Arc::clone(&preloaded.samples);
+                    let push_generation_state = Arc::clone(&self.audio_push_generation);
                     thread::spawn(move || {
                         queue.push_interleaved_cancellable(samples_arc.iter().copied(), || {
                             pb_gen.load(Ordering::SeqCst) == generation
+                                && push_generation_state.load(Ordering::SeqCst) == push_generation
                         });
                     });
                 }
@@ -1990,6 +2001,8 @@ impl KanonoApp {
         // Invalidate previous workers and stream-decode in background thread
         self.preloaded_track = None;
         self.current_track_samples = None;
+        let streaming_samples = Arc::new(Mutex::new(Vec::new()));
+        self.streaming_track_samples = Some(Arc::clone(&streaming_samples));
         let generation = self.playback_generation.fetch_add(1, Ordering::SeqCst) + 1;
         let pb_gen = Arc::clone(&self.playback_generation);
 
@@ -2003,6 +2016,8 @@ impl KanonoApp {
             let target_channels = output.config.channels;
             let tx = self.decode_tx.clone();
             let queue = output.queue.clone();
+            let push_generation_state = Arc::clone(&self.audio_push_generation);
+            push_generation_state.fetch_add(1, Ordering::SeqCst);
 
             thread::spawn(move || {
                 if pb_gen.load(Ordering::SeqCst) != generation {
@@ -2011,6 +2026,7 @@ impl KanonoApp {
                 let check_gen = Arc::clone(&pb_gen);
                 let push_gen = Arc::clone(&pb_gen);
                 let queue_clone = queue.clone();
+                let stream_samples = Arc::clone(&streaming_samples);
 
                 match decode_track_streaming(
                     &path,
@@ -2018,9 +2034,15 @@ impl KanonoApp {
                     target_channels,
                     move || check_gen.load(Ordering::SeqCst) == generation,
                     move |chunk| {
+                        if let Ok(mut samples) = stream_samples.lock() {
+                            samples.extend_from_slice(chunk);
+                        }
                         let push_check = Arc::clone(&push_gen);
+                        let push_generation_check = Arc::clone(&push_generation_state);
+                        let push_generation = push_generation_check.load(Ordering::SeqCst);
                         queue_clone.push_interleaved_cancellable(chunk.iter().copied(), move || {
                             push_check.load(Ordering::SeqCst) == generation
+                                && push_generation_check.load(Ordering::SeqCst) == push_generation
                         });
                     },
                 ) {
@@ -2053,33 +2075,70 @@ impl KanonoApp {
         let target_duration = Duration::from_secs_f64(target_secs);
         self.playback.elapsed = target_duration;
 
-        if let (Some(audio_output), Some(samples)) = (&self.audio_output, &self.current_track_samples) {
-            self.pending_seek_fraction = None;
-            let generation = self.playback_generation.fetch_add(1, Ordering::SeqCst) + 1;
-            let playback_generation = Arc::clone(&self.playback_generation);
-
+        let was_playing = self.is_playing;
+        if let Some(audio_output) = &self.audio_output {
+            let _ = audio_output.pause();
             audio_output.queue.clear();
             self.playback_receiver.clear();
             audio_output.set_position(target_duration);
+        }
 
+        let available_samples = self.current_track_samples.clone().or_else(|| {
+            self.streaming_track_samples.as_ref().and_then(|samples| {
+                samples.lock().ok().map(|samples| Arc::new(samples.clone()))
+            })
+        });
+
+        if let (Some(audio_output), Some(samples)) = (&self.audio_output, available_samples) {
             let sample_rate = audio_output.config.sample_rate.0 as usize;
             let channels = usize::from(audio_output.config.channels).max(1);
             let raw_offset = (target_secs * sample_rate as f64 * channels as f64) as usize;
+
+            if raw_offset > samples.len() {
+                self.pending_seek_fraction = Some(fraction);
+                self.seeking_fraction = Some(fraction);
+                return;
+            }
+
+            self.pending_seek_fraction = None;
+            self.seeking_fraction = None;
+            let generation = if self.current_track_samples.is_some() {
+                self.playback_generation.fetch_add(1, Ordering::SeqCst) + 1
+            } else {
+                self.playback_generation.load(Ordering::SeqCst)
+            };
+            let playback_generation = Arc::clone(&self.playback_generation);
+            let push_generation = self.audio_push_generation.fetch_add(1, Ordering::SeqCst) + 1;
+            let push_generation_state = Arc::clone(&self.audio_push_generation);
             let sample_offset = (raw_offset.min(samples.len())) / channels * channels;
 
             let queue = audio_output.queue.clone();
-            let samples_arc = Arc::clone(samples);
             thread::spawn(move || {
-                let slice = &samples_arc[sample_offset..];
+                let slice = &samples[sample_offset..];
                 queue.push_interleaved_cancellable(slice.iter().copied(), || {
                     playback_generation.load(Ordering::SeqCst) == generation
+                        && push_generation_state.load(Ordering::SeqCst) == push_generation
                 });
             });
 
+            if was_playing {
+                let _ = audio_output.play();
+            }
             self.maybe_preload_next_track();
         } else {
             self.pending_seek_fraction = Some(fraction);
+            self.seeking_fraction = Some(fraction);
         }
+    }
+
+    fn seek_by_micros(&mut self, offset_micros: i64) {
+        let Some(duration) = self.playback.metadata.duration else { return };
+        if duration.is_zero() {
+            return;
+        }
+        let current = self.playback.elapsed.as_micros() as i128;
+        let target = (current + i128::from(offset_micros)).clamp(0, duration.as_micros() as i128);
+        self.seek_to(target as f32 / duration.as_micros() as f32);
     }
 
     fn play_next(&mut self) {
@@ -2199,6 +2258,7 @@ impl KanonoApp {
 
     fn stop_playback(&mut self) {
         self.playback_generation.fetch_add(1, Ordering::SeqCst);
+        self.audio_push_generation.fetch_add(1, Ordering::SeqCst);
         self.preloaded_track = None;
         if let Some(audio_output) = &self.audio_output {
             audio_output.queue.clear();
