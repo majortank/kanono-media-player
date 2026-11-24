@@ -36,6 +36,11 @@ Download precompiled standalone binaries and installers for your operating syste
 | **macOS** | Disk Image (`.dmg`) | Intel (`x64`) | [**⬇️ Download for macOS (Intel)**](https://github.com/majortank/kanono-media-player/releases/download/v1.1.0/kanono-media-player-macos-x64.dmg) |
 | **Linux** | Portable Archive (`.tar.gz`) | x86_64 | [**⬇️ Download for Linux (x64)**](https://github.com/majortank/kanono-media-player/releases/download/v1.1.0/kanono-media-player-linux-x64.tar.gz) |
 
+> [!NOTE]
+> The v1.1.0 macOS images are carried forward from v1.0.0 while the macOS
+> release toolchain is being updated. The seeking and Arch/Linux packaging
+> changes are included in the new Linux and Windows builds.
+
 > [!TIP]
 > View all version tags, changelogs, and checksums on the [GitHub Releases page](https://github.com/majortank/kanono-media-player/releases).
 
