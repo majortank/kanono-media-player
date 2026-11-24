@@ -218,10 +218,34 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    sudo install -Dm755 target/release/kanono-player /usr/local/bin/kanono-player
    ```
 
-5. **Run with low-latency PipeWire (optional):**
+5. **Install the desktop launcher and icon system-wide (optional):**
+   ```bash
+   sudo install -Dm644 resources/kanono-media-player.desktop \
+     /usr/share/applications/kanono-media-player.desktop
+   sudo install -Dm644 assets/icons/hicolor/scalable/apps/kanono-media-player.svg \
+     /usr/share/icons/hicolor/scalable/apps/kanono-media-player.svg
+   sudo update-desktop-database /usr/share/applications 2>/dev/null || true
+   ```
+   The player will then appear in your desktop application menu and launch as
+   `kanono-player`.
+
+6. **Run with low-latency PipeWire (optional):**
    ```bash
    PIPEWIRE_LATENCY=128/48000 ./target/release/kanono-player
    ```
+
+### Arch Linux package installation
+
+The repository includes a `PKGBUILD` that installs the release binary, desktop
+launcher, and scalable application icon. On an Arch-based system, install it
+with:
+
+```bash
+makepkg -si
+```
+
+Package upgrades automatically replace the binary and refresh the menu entry
+when a new package containing application changes is installed.
 
 ---
 

@@ -266,6 +266,7 @@ pub struct KanonoApp {
     gapless_enabled: bool,
     preloaded_track: Option<PreloadedTrack>,
     seeking_fraction: Option<f32>,
+    pending_seek_fraction: Option<f32>,
     decode_tx: Sender<DecodeEvent>,
     decode_rx: Receiver<DecodeEvent>,
     track_gains: HashMap<PathBuf, ReplayGainResult>,
@@ -467,6 +468,7 @@ impl Application for KanonoApp {
             gapless_enabled: true,
             preloaded_track: None,
             seeking_fraction: None,
+            pending_seek_fraction: None,
             decode_tx,
             decode_rx,
             track_gains: HashMap::new(),
@@ -1623,6 +1625,9 @@ impl KanonoApp {
                 self.mpris_state.set_metadata(self.playback.metadata.clone());
                 self.playback_sender.publish_track(self.playback.metadata.clone());
 
+                if let Some(fraction) = self.pending_seek_fraction.take() {
+                    self.seek_to(fraction);
+                }
                 self.maybe_preload_next_track();
             }
             DecodeEvent::PreloadReady {
@@ -1908,6 +1913,7 @@ impl KanonoApp {
         self.current_playing_track_id = Some(track_id);
         self.is_playing = true;
         self.seeking_fraction = None;
+        self.pending_seek_fraction = None;
         self.playback.elapsed = Duration::ZERO;
         self.playback.metadata = metadata.clone();
         self.mpris_state.set_metadata(self.playback.metadata.clone());
@@ -2011,11 +2017,13 @@ impl KanonoApp {
         let Some(duration) = self.playback.metadata.duration else { return };
         if duration.is_zero() { return; }
 
-        let target_secs = duration.as_secs_f64() * (fraction.clamp(0.0, 1.0) as f64);
+        let fraction = fraction.clamp(0.0, 1.0);
+        let target_secs = duration.as_secs_f64() * (fraction as f64);
         let target_duration = Duration::from_secs_f64(target_secs);
         self.playback.elapsed = target_duration;
 
         if let (Some(audio_output), Some(samples)) = (&self.audio_output, &self.current_track_samples) {
+            self.pending_seek_fraction = None;
             let generation = self.playback_generation.fetch_add(1, Ordering::SeqCst) + 1;
             let playback_generation = Arc::clone(&self.playback_generation);
 
@@ -2038,6 +2046,8 @@ impl KanonoApp {
             });
 
             self.maybe_preload_next_track();
+        } else {
+            self.pending_seek_fraction = Some(fraction);
         }
     }
 
@@ -2169,6 +2179,7 @@ impl KanonoApp {
         }
         self.is_playing = false;
         self.seeking_fraction = None;
+        self.pending_seek_fraction = None;
         self.playback.elapsed = Duration::ZERO;
         self.mpris_state.set_playing(false);
     }
