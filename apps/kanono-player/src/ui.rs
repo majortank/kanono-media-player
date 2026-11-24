@@ -19,6 +19,7 @@ use crate::{
     BatchEditState, BatchField, BpmFilter, DurationFilter, EditField, EditingTrackState,
     FilterCategory, FilterState, Message, NavTab,
 };
+use crate::youtube::YouTubeItem;
 
 const LOGO_SVG: &[u8] = include_bytes!("../../../assets/icons/hicolor/scalable/apps/kanono-media-player.svg");
 const ICON_PLAY_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#ffffff"><polygon points="6,4 20,12 6,20"/></svg>"##;
@@ -64,6 +65,11 @@ pub struct ViewProps<'a> {
     pub selected_folder: Option<&'a PathBuf>,
     pub expanded_folders: &'a HashSet<PathBuf>,
     pub current_tab: NavTab,
+    pub youtube_query: &'a str,
+    pub youtube_results: &'a [YouTubeItem],
+    pub youtube_searching: bool,
+    pub youtube_busy: bool,
+    pub recently_converted: &'a [LibraryTrack],
     pub filter_state: &'a FilterState,
     pub search: &'a str,
     pub selected_track: Option<i64>,
@@ -227,6 +233,7 @@ pub fn player_view<'a>(props: ViewProps<'a>, panes: &'a pane_grid::State<PlayerP
                 NavTab::Library | NavTab::Folders | NavTab::MostPlayed => render_track_list(&props),
                 NavTab::Queue => render_queue_list(&props),
                 NavTab::LibraryManager => render_library_manager(&props),
+                NavTab::YouTube => render_youtube_view(&props),
                 NavTab::Info => render_info_view(&props),
             },
         })
@@ -299,6 +306,20 @@ fn render_sidebar<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
     .width(Length::Fill)
     .padding([8, 12])
     .style(if is_queue_active { btn_selected_nav_style(p) } else { btn_nav_style(p) });
+
+    let is_youtube_active = props.current_tab == NavTab::YouTube;
+    let youtube_btn = button(
+        row![
+            svg_icon(ICON_DISC_SVG, 16.0),
+            text("YouTube").size(14).width(Length::Fill),
+        ]
+        .spacing(8)
+        .align_items(Alignment::Center),
+    )
+    .on_press(Message::SelectTab(NavTab::YouTube))
+    .width(Length::Fill)
+    .padding([8, 12])
+    .style(if is_youtube_active { btn_selected_nav_style(p) } else { btn_nav_style(p) });
 
     let is_manager_active = props.current_tab == NavTab::LibraryManager;
     let manager_btn = button(
@@ -576,6 +597,7 @@ fn render_sidebar<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
         lib_btn,
         most_played_btn,
         queue_btn,
+        youtube_btn,
         manager_btn,
         info_btn,
         text("FILTER BY").size(11).style(p.text_muted),
@@ -1324,6 +1346,102 @@ fn render_queue_list<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
     .width(Length::Fill)
     .height(Length::Fill)
     .style(panel_container_style(p))
+    .into()
+}
+
+fn render_youtube_view<'a>(props: &ViewProps<'a>) -> Element<'a, Message> {
+    let p = &props.palette;
+    let search = row![
+        text_input("Search YouTube or paste a youtube.com / youtu.be URL", props.youtube_query)
+            .on_input(Message::YouTubeQueryChanged)
+            .on_submit(Message::YouTubeSearch)
+            .padding(10)
+            .width(Length::Fill),
+        button(text(if props.youtube_searching { "Searching..." } else { "Search" }).size(13))
+            .on_press_maybe((!props.youtube_searching && !props.youtube_busy).then_some(Message::YouTubeSearch))
+            .padding([9, 16])
+            .style(btn_primary_style(p)),
+    ]
+    .spacing(8)
+    .align_items(Alignment::Center);
+
+    let mut results = column![].spacing(8);
+    if props.youtube_results.is_empty() && !props.youtube_searching {
+        results = results.push(
+            container(
+                column![
+                    svg_icon(ICON_DISC_SVG, 42.0),
+                    text("Search YouTube for music").size(20).style(p.text_primary),
+                    text("Use a search phrase or a full YouTube URL. Results can be streamed or saved as MP3.")
+                        .size(13)
+                        .style(p.text_secondary),
+                ]
+                .spacing(8)
+                .align_items(Alignment::Center),
+            )
+            .padding(36)
+            .width(Length::Fill)
+            .style(panel_container_style(p)),
+        );
+    } else {
+        for item in props.youtube_results {
+            let duration = item.duration.map(format_duration).unwrap_or_else(|| "Unknown duration".to_owned());
+            let row = row![
+                column![
+                    text(item.title.clone()).size(14).style(p.text_primary),
+                    text(format!("{}  •  {}  •  ID: {}", item.channel, duration, item.id))
+                        .size(11)
+                        .style(p.text_secondary),
+                ]
+                .spacing(4)
+                .width(Length::Fill),
+                button(text("Stream Online").size(12))
+                    .on_press_maybe((!props.youtube_busy).then_some(Message::YouTubeStream(item.clone())))
+                    .padding([7, 10])
+                    .style(btn_primary_style(p)),
+                button(text("Convert to MP3 & Save").size(12))
+                    .on_press_maybe((!props.youtube_busy).then_some(Message::YouTubeConvert(item.clone())))
+                    .padding([7, 10])
+                    .style(btn_default_style(p)),
+            ]
+            .spacing(8)
+            .align_items(Alignment::Center);
+            results = results.push(container(row).padding(10).style(panel_container_style(p)));
+        }
+    }
+
+    let mut converted = column![text("Recently Converted Tracks").size(15).style(p.text_primary)].spacing(5);
+    if props.recently_converted.is_empty() {
+        converted = converted.push(text("No converted tracks yet").size(12).style(p.text_muted));
+    } else {
+        for track in props.recently_converted {
+            converted = converted.push(
+                row![
+                    text(track.title.clone()).size(12).width(Length::Fill),
+                    text(track.artist.clone()).size(11).style(p.text_secondary),
+                    text(track.path.display().to_string()).size(10).style(p.text_muted),
+                ]
+                .spacing(8)
+                .align_items(Alignment::Center),
+            );
+        }
+    }
+
+    container(
+        column![
+            text("YouTube").size(22).style(p.text_primary),
+            text("Search, stream online, or convert YouTube audio into your local library.")
+                .size(13)
+                .style(p.text_secondary),
+            search,
+            scrollable(results).height(Length::Fill),
+            container(converted).padding(12).style(panel_container_style(p)),
+        ]
+        .spacing(12)
+        .padding(16)
+        .height(Length::Fill),
+    )
+    .style(root_background_style(p))
     .into()
 }
 

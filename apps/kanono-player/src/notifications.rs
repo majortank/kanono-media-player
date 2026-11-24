@@ -20,3 +20,16 @@ pub fn track_started(title: &str, artist: &str, album: &str) {
         eprintln!("unable to show track notification: {error}");
     }
 }
+
+pub fn error(summary: &str, body: &str) {
+    if let Err(error) = Notification::new()
+        .appname("Kanono Media Player")
+        .summary(summary)
+        .body(body)
+        .icon("kanono-media-player")
+        .timeout(Timeout::Milliseconds(5000))
+        .show()
+    {
+        eprintln!("unable to show notification: {error}");
+    }
+}

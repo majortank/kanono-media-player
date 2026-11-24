@@ -12,6 +12,7 @@ mod tray;
 mod plugins;
 mod theme;
 mod ui;
+mod youtube;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -39,6 +40,7 @@ use mpris::{MprisCommand, MprisService, MprisState};
 use plugins::PluginRegistry;
 use theme::PlayerTheme;
 use ui::{build_folder_tree, player_view, FolderTreeNode, PlayerPane, ViewProps};
+use youtube::{YouTubeConversion, YouTubeItem};
 
 fn load_app_icon() -> Option<iced::window::Icon> {
     const ICON_BYTES: &[u8] = include_bytes!("../../../assets/icons/kanono-player.png");
@@ -77,6 +79,7 @@ pub enum NavTab {
     Queue,
     Folders,
     LibraryManager,
+    YouTube,
     Info,
 }
 
@@ -305,6 +308,12 @@ pub struct KanonoApp {
     latency_profile: LatencyProfile,
     audio_device_info: AudioDeviceInfo,
     inspecting_track_id: Option<i64>,
+    youtube_query: String,
+    youtube_results: Vec<YouTubeItem>,
+    youtube_searching: bool,
+    youtube_busy: bool,
+    recently_converted: Vec<LibraryTrack>,
+    pending_converted_path: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -331,6 +340,13 @@ pub enum Message {
     PlayFolder(PathBuf),
     QueueFolder(PathBuf),
     SelectTab(NavTab),
+    YouTubeQueryChanged(String),
+    YouTubeSearch,
+    YouTubeSearchFinished(Result<Vec<YouTubeItem>, String>),
+    YouTubeStream(YouTubeItem),
+    YouTubeStreamFinished(Result<LibraryTrack, String>),
+    YouTubeConvert(YouTubeItem),
+    YouTubeConvertFinished(Result<YouTubeConversion, String>),
     PlayMostPlayed,
     QueueMostPlayed,
     SelectFilterCategory(FilterCategory),
@@ -509,6 +525,12 @@ impl Application for KanonoApp {
             latency_profile: LatencyProfile::default(),
             audio_device_info,
             inspecting_track_id: None,
+            youtube_query: String::new(),
+            youtube_results: Vec::new(),
+            youtube_searching: false,
+            youtube_busy: false,
+            recently_converted: Vec::new(),
+            pending_converted_path: None,
         };
         app.refresh_visible_tracks();
         (app, resolve_missing_durations())
@@ -618,6 +640,72 @@ impl Application for KanonoApp {
                     self.refresh_visible_tracks();
                 } else if tab == NavTab::LibraryManager {
                     self.refresh_library_manager_state();
+                }
+            }
+            Message::YouTubeQueryChanged(query) => {
+                self.youtube_query = query;
+            }
+            Message::YouTubeSearch => {
+                let query = self.youtube_query.trim().to_owned();
+                if query.is_empty() {
+                    self.status_message = Some("Enter a YouTube search or URL".to_owned());
+                } else {
+                    self.youtube_searching = true;
+                    self.status_message = Some("Searching YouTube...".to_owned());
+                    return Command::perform(youtube_search_task(query), Message::YouTubeSearchFinished);
+                }
+            }
+            Message::YouTubeSearchFinished(result) => {
+                self.youtube_searching = false;
+                match result {
+                    Ok(results) => {
+                        self.youtube_results = results;
+                        self.status_message = Some(format!("Found {} YouTube result(s)", self.youtube_results.len()));
+                    }
+                    Err(error) => self.set_youtube_error(error),
+                }
+            }
+            Message::YouTubeStream(item) => {
+                if self.youtube_busy {
+                    return Command::none();
+                }
+                self.youtube_busy = true;
+                self.status_message = Some(format!("Buffering \"{}\"...", item.title));
+                return Command::perform(youtube_stream_task(item), Message::YouTubeStreamFinished);
+            }
+            Message::YouTubeStreamFinished(result) => {
+                self.youtube_busy = false;
+                match result {
+                    Ok(track) => {
+                        let track_id = track.id;
+                        self.all_tracks.push(track.clone());
+                        self.refresh_visible_tracks();
+                        self.play_track(track_id);
+                        self.status_message = Some(format!("Streaming \"{}\"", track.title));
+                    }
+                    Err(error) => self.set_youtube_error(error),
+                }
+            }
+            Message::YouTubeConvert(item) => {
+                if self.youtube_busy {
+                    return Command::none();
+                }
+                self.youtube_busy = true;
+                self.status_message = Some(format!("Converting \"{}\" to MP3...", item.title));
+                let target_dir = self.youtube_library_directory();
+                return Command::perform(youtube_convert_task(item, target_dir), Message::YouTubeConvertFinished);
+            }
+            Message::YouTubeConvertFinished(result) => {
+                self.youtube_busy = false;
+                match result {
+                    Ok(conversion) => {
+                        self.pending_converted_path = Some(conversion.path.clone());
+                        self.recently_converted.insert(0, conversion.track.clone());
+                        self.recently_converted.truncate(20);
+                        self.status_message = Some(format!("Saved converted track to {}", conversion.path.display()));
+                        return Command::perform(index_music_folder(conversion.path.parent().unwrap_or(Path::new(".")).to_path_buf()), Message::LibraryIndexed);
+                    }
+                    Err(error) => self.set_youtube_error(error),
                 }
             }
             Message::PlayMostPlayed => {
@@ -1196,6 +1284,11 @@ impl Application for KanonoApp {
             selected_folder: self.selected_folder.as_ref(),
             expanded_folders: &self.expanded_folders,
             current_tab: self.current_tab,
+            youtube_query: &self.youtube_query,
+            youtube_results: &self.youtube_results,
+            youtube_searching: self.youtube_searching,
+            youtube_busy: self.youtube_busy,
+            recently_converted: &self.recently_converted,
             filter_state: &self.filter_state,
             search: &self.search,
             selected_track: self.selected_track,
@@ -1284,6 +1377,32 @@ async fn pick_music_folder() -> Option<PathBuf> {
         .pick_folder()
         .await
         .map(|handle| handle.path().to_owned())
+}
+
+async fn youtube_search_task(query: String) -> Result<Vec<YouTubeItem>, String> {
+    tokio::task::spawn_blocking(move || youtube::search_or_resolve(&query).map_err(|error| error.to_string()))
+        .await
+        .map_err(|error| format!("YouTube search worker failed: {error}"))?
+}
+
+async fn youtube_stream_task(item: YouTubeItem) -> Result<LibraryTrack, String> {
+    tokio::task::spawn_blocking(move || youtube::prepare_stream_cache(&item).map_err(|error| error.to_string()))
+        .await
+        .map_err(|error| format!("YouTube stream worker failed: {error}"))?
+}
+
+async fn youtube_convert_task(item: YouTubeItem, target_dir: PathBuf) -> Result<YouTubeConversion, String> {
+    tokio::task::spawn_blocking(move || youtube::convert_to_mp3(&item, &target_dir).map_err(|error| error.to_string()))
+        .await
+        .map_err(|error| format!("YouTube conversion worker failed: {error}"))?
+}
+
+fn default_youtube_library_directory() -> PathBuf {
+    std::env::var_os("XDG_MUSIC_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Music")))
+        .unwrap_or_else(|| std::env::temp_dir().join("Music"))
+        .join("Kanono YouTube")
 }
 
 async fn index_music_files(files: Vec<PathBuf>) -> IndexResult {
@@ -1555,6 +1674,19 @@ fn library_database_path() -> PathBuf {
 }
 
 impl KanonoApp {
+    fn set_youtube_error(&mut self, error: String) {
+        self.status_message = Some(format!("YouTube error: {error}"));
+        #[cfg(target_os = "linux")]
+        notifications::error("YouTube error", &error);
+    }
+
+    fn youtube_library_directory(&self) -> PathBuf {
+        self.library_folders
+            .first()
+            .map(|folder| folder.path.clone())
+            .unwrap_or_else(default_youtube_library_directory)
+    }
+
     fn apply_volume(&self) {
         if let Some(output) = &self.audio_output {
             if self.is_muted {
@@ -1844,6 +1976,13 @@ impl KanonoApp {
         self.set_all_tracks(result.tracks);
         self.selected_folder = Some(result.folder);
         self.refresh_visible_tracks();
+        if let Some(path) = self.pending_converted_path.take() {
+            if let Some(track_id) = self.all_tracks.iter().find(|track| track.path == path).map(|track| track.id) {
+                if !self.queued_track_ids.contains(&track_id) {
+                    self.queued_track_ids.push(track_id);
+                }
+            }
+        }
     }
 
     fn set_all_tracks(&mut self, tracks: Vec<LibraryTrack>) {
